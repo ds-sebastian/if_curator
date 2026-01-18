@@ -6,6 +6,7 @@ yolov9c.pt
 .huggingface/
 .cache/huggingface
 
+.immich_config.json
 # Python-generated files
 __pycache__/
 *.py[oc]

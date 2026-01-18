@@ -8,6 +8,7 @@ Unified embedding interface for faces and objects.
 import contextlib
 import logging
 import os
+import warnings
 
 import cv2
 import numpy as np
@@ -89,7 +90,11 @@ def get_face_embedding(img_pil: Image.Image) -> np.ndarray | None:
     try:
         # InsightFace expects BGR cv2 image
         img_bgr = cv2.cvtColor(np.asarray(img_pil), cv2.COLOR_RGB2BGR)
-        faces = app.get(img_bgr)
+
+        # Suppress scikit-image FutureWarning from InsightFace's face_align.py
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*estimate.*is deprecated", category=FutureWarning)
+            faces = app.get(img_bgr)
 
         if not faces:
             return None
