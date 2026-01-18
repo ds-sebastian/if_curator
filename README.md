@@ -11,13 +11,15 @@
 
 </div>
 
-> [!WARNING]
-> **Regarding Object Classification**
->
-> Frigate **does not support** uploading custom images for object classification training via the UI or API.
-> This tool currently prepares the dataset (crops and categorizes images) for training external models (like YOLO) manually.
 
 ---
+
+> [!WARNING]  
+> This is 100% vibe-coded.
+
+
+
+
 
 ## ⚡ Why This Tool?
 
@@ -33,6 +35,12 @@ Training AI models on "bulk" data is often harmful. If you feed the model 50 ima
 | **🐶 Object** | SigLIP (Vision Transformer) | Farthest Point Sampling |
 
 Both use the same **Farthest Point Sampling (FPS)** algorithm that mathematically selects images until redundancy starts, ensuring optimal diversity whether that's 20 or 150 images.
+
+> [!WARNING]
+> **Regarding Object Classification**
+>
+> Frigate **does not support** uploading custom images for object classification training via the UI or API.
+> This tool currently prepares the dataset (crops and categorizes images) for training external models (like YOLO) manually.
 
 ---
 
