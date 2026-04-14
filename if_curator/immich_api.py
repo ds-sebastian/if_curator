@@ -54,7 +54,7 @@ def fetch_all_assets(person: dict) -> list[dict]:
         try:
             resp = requests.post(
                 url,
-                json={"personIds": [person_id], "size": page_size, "page": page},
+                json={"personIds": [person_id], "size": page_size, "page": page, "withPeople": True},
                 headers=get_headers(),
                 timeout=30,
             )
