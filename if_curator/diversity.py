@@ -10,13 +10,13 @@ Selection pipeline:
 """
 
 import logging
-from io import BytesIO
 
 import numpy as np
 import requests
 from PIL import Image
 
 from .config import Config, get_headers
+from .immich_api import fetch_preview_image
 from .embeddings import get_embedding, is_embedding_available
 from .quality import assess_quality
 
@@ -72,12 +72,7 @@ def select_diverse_assets(
 
 def _fetch_thumbnail(asset_id: str, timeout: int = 10) -> Image.Image | None:
     """Fetch thumbnail from Immich API."""
-    try:
-        url = f"{Config.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG"
-        resp = requests.get(url, headers=get_headers(), timeout=timeout)
-        return Image.open(BytesIO(resp.content)) if resp.ok else None
-    except Exception:
-        return None
+    return fetch_preview_image(asset_id, timeout)
 
 
 def _get_face_bbox(asset: dict) -> tuple[float, float, float, float] | None:

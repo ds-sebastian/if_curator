@@ -2,10 +2,7 @@
 
 import logging
 import os
-from io import BytesIO
-
 import requests
-from PIL import Image
 from rich import print as rprint
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -15,7 +12,7 @@ from .config import Config, ConfigManager
 from .diversity import select_diverse_assets
 from .embeddings import is_embedding_available
 from .image_processing import process_face_mode, process_full_mode, process_object_mode
-from .immich_api import fetch_all_assets, fetch_full_image, filter_recent_assets, get_people
+from .immich_api import fetch_all_assets, fetch_full_image, fetch_preview_image, filter_recent_assets, get_people
 from .logging import console, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -238,15 +235,7 @@ def execute_jobs(jobs: list[dict]) -> None:
             for asset in assets:
                 try:
                     # Use full-resolution for final output when configured
-                    if use_full_res:
-                        img = fetch_full_image(asset["id"])
-                    else:
-                        resp = requests.get(
-                            f"{Config.IMMICH_URL}/api/assets/{asset['id']}/thumbnail?size=preview&format=JPEG",
-                            headers={"x-api-key": Config.API_KEY, "Accept": "application/json"},
-                            timeout=30,
-                        )
-                        img = Image.open(BytesIO(resp.content)) if resp.ok else None
+                    img = fetch_full_image(asset["id"]) if use_full_res else fetch_preview_image(asset["id"])
 
                     if img is None:
                         progress.console.print(f"[red]Failed download {asset['id']}[/red]")

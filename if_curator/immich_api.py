@@ -7,7 +7,7 @@ from io import BytesIO
 
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .config import Config, get_headers
 
@@ -148,6 +148,18 @@ def fetch_face_data(asset_id: str, person_id: str | None = None) -> FaceData | N
         return None
 
 
+def _open_image(data: bytes) -> Image.Image:
+    """Open image bytes and apply EXIF orientation so pixel layout matches display orientation.
+
+    Immich detects faces on the display-oriented image, so bounding box
+    coordinates assume EXIF rotation is applied.  PIL.Image.open() loads
+    raw pixels without applying EXIF, which causes wrong crop regions for
+    rotated images.
+    """
+    img = Image.open(BytesIO(data))
+    return ImageOps.exif_transpose(img) or img
+
+
 def fetch_full_image(asset_id: str, timeout: int = 60) -> Image.Image | None:
     """Fetch full-resolution image from Immich, falling back to preview thumbnail.
 
@@ -163,24 +175,28 @@ def fetch_full_image(asset_id: str, timeout: int = 60) -> Image.Image | None:
         )
         if resp.ok:
             try:
-                return Image.open(BytesIO(resp.content))
+                return _open_image(resp.content)
             except Exception:
                 logger.debug(f"PIL can't open original for {asset_id}, falling back to preview")
     except requests.RequestException:
         logger.debug(f"Original request failed for {asset_id}, falling back to preview")
 
     # Fall back to preview thumbnail (always JPEG)
+    return fetch_preview_image(asset_id)
+
+
+def fetch_preview_image(asset_id: str, timeout: int = 30) -> Image.Image | None:
+    """Fetch EXIF-corrected preview thumbnail from Immich."""
     try:
         resp = requests.get(
             f"{Config.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG",
             headers=get_headers(),
-            timeout=30,
+            timeout=timeout,
         )
         if resp.ok:
-            return Image.open(BytesIO(resp.content))
+            return _open_image(resp.content)
     except Exception as e:
         logger.error(f"Failed to fetch image {asset_id}: {e}")
-
     return None
 
 
