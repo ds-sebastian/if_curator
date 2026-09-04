@@ -204,3 +204,26 @@ def test_failed_model_initialization_is_not_cached(monkeypatch):
     assert embeddings.get_insightface_app() is None
     assert construct.call_count == 2
     assert construct.call_args.kwargs["providers"] == ["CPUExecutionProvider"]
+
+
+def test_asset_search_requests_people_and_uses_inline_faces(monkeypatch):
+    metadata = dict(
+        id="face",
+        imageWidth=100,
+        imageHeight=100,
+        boundingBoxX1=0,
+        boundingBoxY1=0,
+        boundingBoxX2=100,
+        boundingBoxY2=100,
+    )
+    asset = {"id": "asset", "people": [{"id": "person", "faces": [metadata]}]}
+    post_response = Mock()
+    post_response.json.return_value = {"assets": {"items": [asset]}}
+    post = Mock(return_value=post_response)
+    get = Mock(side_effect=AssertionError("Complete inline face metadata must avoid another request"))
+    monkeypatch.setattr(immich_api.requests, "post", post)
+    monkeypatch.setattr(immich_api.requests, "get", get)
+    assets = immich_api.fetch_all_assets({"id": "person", "name": "Person"})
+    assert post.call_args.kwargs["json"] == {"personIds": ["person"], "size": 1000, "page": 1, "withPeople": True}
+    assert immich_api.resolve_face_metadata(assets[0], "person") == metadata
+    get.assert_not_called()
