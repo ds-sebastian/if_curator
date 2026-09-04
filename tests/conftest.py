@@ -58,6 +58,8 @@ def fake_app(monkeypatch):
     embedding = np.arange(512, dtype=np.float32) + 1
     recognition = SimpleNamespace(get=lambda bgr, target: embedding.copy())
     app = SimpleNamespace(models={"recognition": recognition})
+    recognition.fingerprint = "frigate-test"
+    monkeypatch.setattr(faces, "get_frigate_model", lambda: recognition)
     monkeypatch.setattr(faces, "detect_target", detect)
     monkeypatch.setattr(faces, "get_insightface_app", lambda: app)
     monkeypatch.setattr(faces, "model_fingerprint", lambda app: "test-fingerprint")

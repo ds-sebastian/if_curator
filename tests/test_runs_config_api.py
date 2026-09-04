@@ -106,6 +106,7 @@ def test_configuration_defaults_and_all_overrides(monkeypatch, tmp_path):
             overrides[name] = 0.25
         else:
             overrides[name] = "custom-cache"
+    overrides["FRIGATE_VERSION"] = "0.17.2"
     instance = load_config(monkeypatch, tmp_path, **overrides)
     for name in overrides:
         expected = overrides[name]

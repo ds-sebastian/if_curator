@@ -1,5 +1,6 @@
 """Interactive CLI for if-curator."""
 
+import argparse
 import hashlib
 import logging
 
@@ -8,14 +9,17 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
+from .camera import embed_samples, load_manifest
 from .config import Config, ConfigManager
 from .diversity import select_diverse_assets
 from .embeddings import is_embedding_available
-from .faces import FacePipelineError, prepare_face_candidates, select_face_candidates
+from .faces import FacePipelineError, prepare_face_candidates
+from .frigate import get_frigate_model
 from .image_processing import process_full_mode, process_object_mode
 from .immich_api import fetch_all_assets, fetch_full_image, fetch_preview_image, filter_recent_assets, get_people
 from .logging import console, setup_logging
 from .runs import RunWorkspace, person_directory
+from .selection import evaluate, select_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ def _get_strategy_choice(has_embedding: bool, entity_type: str) -> tuple[int | s
     if entity_type == "face":
         if not has_embedding:
             raise FacePipelineError("InsightFace unavailable; cannot validate face candidates")
-        rprint(f"  1. Diverse (up to {Config.FACE_MAX_IMAGES}) [Recommended]")
+        rprint(f"  1. Centroid (up to {Config.FACE_MAX_IMAGES}) [Recommended]")
         rprint("  2. Starter (up to 5)")
         rprint("  3. Custom count")
         rprint("  4. Skip")
@@ -43,7 +47,7 @@ def _get_strategy_choice(has_embedding: bool, entity_type: str) -> tuple[int | s
             limit = 0
             while limit <= 0:
                 limit = IntPrompt.ask("Maximum images (positive integer)", default=30)
-            mode = "smart" if Confirm.ask("Use representative diversity?", default=True) else "time"
+            mode = "smart" if Confirm.ask("Optimize the Frigate identity centroid?", default=True) else "time"
             return limit, mode
         return (Config.FACE_MAX_IMAGES if choice == "1" else 5), "smart"
 
@@ -133,9 +137,9 @@ def _configure_person(person: dict, workspace: RunWorkspace) -> dict | None:
                 workspace.preparation_directory(person["id"]),
                 lambda c, t: progress.update(task, completed=c, total=t),
             )
-            selected = select_face_candidates(candidates, limit, selection_mode)
-        selected_ids = {c.asset_id for c in selected}
-        selected_assets = [a for a in recent_assets if a["id"] in selected_ids]
+        # Joint selection happens after all identities are queued.
+        selected = []
+        selected_assets = recent_assets
         return {
             "person": person,
             "assets": selected_assets,
@@ -270,6 +274,14 @@ def _show_preview(jobs: list[dict]) -> None:
 
     console.print()
     console.print(table)
+    for job in jobs:
+        report = job.get("selection_report")
+        if report:
+            console.print(
+                f"{job['person']['name']}: {report['reference_source']}; "
+                f"centroid/reference cosine {report['centroid_reference_cosine']}; "
+                f"{job['limit']} / {job['requested_limit']} images"
+            )
     console.print()
 
 
@@ -321,8 +333,36 @@ def execute_jobs(jobs: list[dict], workspace: RunWorkspace | None = None):
         raise
 
 
+def finalize_face_selection(jobs, workspace, samples=()):
+    face_ids = {j["person"]["id"] for j in jobs if j["config"]["mode"] == "face"}
+    if any(s.person_id is not None and s.person_id not in face_ids for s in samples):
+        raise ValueError("Every labeled camera identity must be queued in face mode; null means unknown")
+    if not face_ids:
+        return
+    embed_samples(samples, "reference")
+    embed_samples(samples, "validation")
+    result = select_jobs(jobs, samples)
+    # Test embeddings cannot influence subset choice: read them only after search has finished.
+    embed_samples(samples, "test")
+    test = [s for s in samples if s.split == "test"]
+    workspace.manifest["evaluation"] = {
+        "validation": result["validation"],
+        "baseline_validation": result["baseline_validation"],
+        "test": evaluate(result["centers"], test),
+        "baseline_test": evaluate(result["baseline_centers"], test),
+        "baseline": "one reference-nearest quality-approved image per smart identity; time selections unchanged",
+        "camera_samples": [s.record() for s in samples],
+        "test_used_for_selection": False,
+        "model": get_frigate_model().identity,
+    }
+    workspace.record_jobs(jobs)
+
+
 def main() -> None:
     """Entry point for if-curator CLI."""
+    parser = argparse.ArgumentParser(description="Prepare Frigate enrollment images from Immich")
+    parser.add_argument("--camera-manifest", help="Local JSON with reference/validation/test camera face crops")
+    args = parser.parse_args()
     workspace = None
     try:
         setup_logging(verbose=False)
@@ -348,10 +388,17 @@ def main() -> None:
             rprint("[bold red]Could not fetch people from Immich. Check URL/Key.[/bold red]")
             return
 
+        samples = (
+            load_manifest(args.camera_manifest or Config.CAMERA_MANIFEST)
+            if (args.camera_manifest or Config.CAMERA_MANIFEST)
+            else []
+        )
         workspace = RunWorkspace(Config.OUTPUT_DIR)
         jobs = interactive_configure(people, workspace)
 
         if jobs:
+            with console.status("Optimizing identity centroids and evaluating held-out crops..."):
+                finalize_face_selection(jobs, workspace, samples)
             _show_preview(jobs)
             if Confirm.ask(f"Export {sum(j['limit'] for j in jobs)} selected images?"):
                 destination = execute_jobs(jobs, workspace)

@@ -1,6 +1,6 @@
 """Target-bound, file-backed face preparation and representative selection.
 
-InsightFace distances are curation heuristics, not Frigate confidence scores.
+InsightFace verifies association; Frigate ArcFace embeds the exact prepared bytes.
 """
 
 import hashlib
@@ -18,10 +18,11 @@ from PIL import Image, ImageOps
 from .cache import EmbeddingCache
 from .config import Config
 from .embeddings import get_insightface_app
+from .frigate import blur_reduction, get_frigate_model
 from .immich_api import fetch_image_source, resolve_face_metadata
 from .quality import assess_quality
 
-PREPROCESSING_VERSION = "target-face-jpeg-v1"
+PREPROCESSING_VERSION = "target-face-frigate-jpeg-v2"
 
 
 class FacePipelineError(RuntimeError):
@@ -47,6 +48,8 @@ class FaceCandidate:
     selected: bool = False
     selection_reason: str | None = None
     output_path: str | None = None
+    capture_group: str | None = None
+    pixel_signature: np.ndarray | None = field(default=None, repr=False)
 
     def record(self) -> dict:
         return {
@@ -54,6 +57,7 @@ class FaceCandidate:
             "person_id": self.person_id,
             "face_id": self.face_id,
             "created_at": self.created_at,
+            "capture_group": self.capture_group,
             "metadata_dimensions": self.metadata_dimensions,
             "source": self.source,
             "source_dimensions": self.source_dimensions,
@@ -226,6 +230,9 @@ def _prepare_one(candidate: FaceCandidate, metadata: dict, source_path: Path, di
         reject_grayscale=Config.REJECT_GRAYSCALE,
     )
     candidate.measurements.update(quality.measurements)
+    bgr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    candidate.measurements["frigate_blur_reduction"] = blur_reduction(bgr)
+    candidate.pixel_signature = np.asarray(final.resize((16, 16)), dtype=np.float32).ravel() / 255
     if not quality.passed:
         candidate.reasons.extend(quality.reasons)
         return
@@ -235,15 +242,16 @@ def _prepare_one(candidate: FaceCandidate, metadata: dict, source_path: Path, di
     emb = cache.get(key, version) if cache else None
     if emb is not None:
         try:
-            emb = _normalize_embedding(emb)
+            _normalize_embedding(emb)
         except ValueError:
             emb = None
     if emb is None:
         try:
-            raw_embedding = app.models["recognition"].get(bgr, target)
+            raw_embedding = get_frigate_model().get(bgr, target)
         except Exception as exc:
             raise FacePipelineError("Local face embedding model failed") from exc
-        emb = _normalize_embedding(raw_embedding)
+        _normalize_embedding(raw_embedding)
+        emb = np.asarray(raw_embedding, dtype=np.float32)
         if cache:
             cache.put(key, emb, version)
     candidate.embedding = emb
@@ -259,7 +267,15 @@ def prepare_face_candidates(assets: list[dict], person_id: str, directory: Path,
     source_dir.mkdir(exist_ok=True)
     assets = sorted({a["id"]: a for a in assets}.values(), key=lambda a: (a.get("fileCreatedAt", ""), a["id"]))
     sampled = set(np.linspace(0, len(assets) - 1, min(3000, len(assets)), dtype=int)) if assets else set()
-    records = [FaceCandidate(a["id"], person_id, created_at=a.get("fileCreatedAt", "")) for a in assets]
+    records = [
+        FaceCandidate(
+            a["id"],
+            person_id,
+            created_at=a.get("fileCreatedAt", ""),
+            capture_group=a.get("stackId") or a.get("burstId"),
+        )
+        for a in assets
+    ]
     work = []
     for i, (asset, record) in enumerate(zip(assets, records)):
         if i not in sampled:
@@ -272,7 +288,7 @@ def prepare_face_candidates(assets: list[dict], person_id: str, directory: Path,
     app = get_insightface_app()
     if app is None:
         raise FacePipelineError("InsightFace unavailable; face quality validation requires the local detector")
-    fingerprint = model_fingerprint(app)
+    fingerprint = model_fingerprint(app) + ":" + get_frigate_model().fingerprint
 
     def download(item):
         asset, record = item
@@ -320,66 +336,18 @@ def prepare_face_candidates(assets: list[dict], person_id: str, directory: Path,
 
 
 def select_face_candidates(candidates: list[FaceCandidate], limit: int, mode: str = "smart") -> list[FaceCandidate]:
-    """Quality gates apply even to tiny pools and explicit time selection."""
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
-        raise ValueError("Face limit must be a positive integer")
-    if mode not in {"smart", "time"}:
-        raise ValueError("Unknown face selection mode")
-    valid = []
-    for candidate in candidates:
-        if candidate.reasons:
-            continue
-        try:
-            candidate.embedding = _normalize_embedding(candidate.embedding)
-        except (ValueError, TypeError):
-            candidate.reasons.append("invalid_embedding")
-            continue
-        valid.append(candidate)
-    if not valid:
-        return []
-    valid.sort(key=_quality_order)
-    vectors = np.stack([c.embedding for c in valid])
-    distances = np.clip(1 - vectors @ vectors.T, 0, 2)
-    np.fill_diagonal(distances, 0)
-    if mode == "time":
-        ordered = sorted(valid, key=lambda c: (c.created_at, c.asset_id, c.face_id or ""))
-        selected = [ordered[i] for i in np.linspace(0, len(ordered) - 1, min(limit, len(ordered)), dtype=int)]
-    else:
-        keep = []
-        for i, candidate in enumerate(valid):
-            if keep and np.any(distances[i, keep] < Config.FACE_DUPLICATE_DISTANCE):
-                candidate.reasons.append("near_duplicate")
-            else:
-                keep.append(i)
-        valid = [valid[i] for i in keep]
-        distances = distances[np.ix_(keep, keep)]
-        if len(valid) >= 10:
-            neighbors = distances.copy()
-            np.fill_diagonal(neighbors, np.inf)
-            isolation = np.sort(neighbors, axis=1)[:, :5].mean(axis=1)
-            median = float(np.median(isolation))
-            mad = float(np.median(np.abs(isolation - median)))
-            threshold = median + Config.FACE_OUTLIER_MAD * 1.4826 * mad
-            keep = []
-            for i, candidate in enumerate(valid):
-                candidate.measurements["neighbor_distance"] = float(isolation[i])
-                if mad > 1e-8 and isolation[i] > threshold:
-                    candidate.reasons.append("isolated_outlier")
-                else:
-                    keep.append(i)
-            valid = [valid[i] for i in keep]
-            distances = distances[np.ix_(keep, keep)]
-        if not valid:
-            return []
-        from .diversity import _kmedoids
+    """Single-identity API. The interactive workflow optimizes all identities together."""
+    from .selection import select_jobs
 
-        indices, _ = _kmedoids(distances, min(limit, len(valid)))
-        selected = [valid[i] for i in indices]
-    chosen = {id(c) for c in selected}
-    for candidate in valid:
-        if id(candidate) in chosen:
-            candidate.selected = True
-            candidate.selection_reason = "quality_filtered_time_spread" if mode == "time" else "representative_medoid"
-        else:
-            candidate.reasons.append("not_selected_budget")
-    return sorted(selected, key=_quality_order)
+    identities = {candidate.person_id for candidate in candidates}
+    if len(identities) > 1:
+        raise ValueError("A face pool must belong to one person")
+    job = {
+        "person": {"id": next(iter(identities), "empty")},
+        "candidates": candidates,
+        "requested_limit": limit,
+        "selection_mode": mode,
+        "config": {"mode": "face"},
+    }
+    select_jobs([job])
+    return job["selected_faces"]
