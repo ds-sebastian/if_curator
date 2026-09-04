@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Model versions — bump these when the upstream model changes
 MODEL_VERSIONS = {
     "insightface": "buffalo_l_v1",
-    "siglip": "siglip-base-patch16-224_v1",
+    "siglip": "siglip-base-patch16-224_exif_rgb_v2",
     "immich": "immich_buffalo_l_v1",
 }
 
@@ -82,6 +82,6 @@ _cache: EmbeddingCache | None = None
 def get_cache(cache_dir: str = ".if_cache") -> EmbeddingCache:
     """Get or create the singleton cache instance."""
     global _cache
-    if _cache is None:
+    if _cache is None or _cache.cache_dir != cache_dir:
         _cache = EmbeddingCache(cache_dir)
     return _cache

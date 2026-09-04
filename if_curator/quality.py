@@ -1,6 +1,6 @@
 """Image quality assessment for training data curation.
 
-Filters out images that would hurt Frigate's ArcFace model training:
+Configurable enrollment-quality heuristics:
 blur, grayscale/IR, over/underexposure, tiny faces, low-confidence detections.
 """
 
@@ -20,6 +20,7 @@ class QualityResult:
 
     passed: bool
     reasons: list[str] = field(default_factory=list)
+    measurements: dict[str, float] = field(default_factory=dict)
 
     @property
     def reason(self) -> str:
@@ -39,16 +40,13 @@ def check_blur(img_np: np.ndarray, threshold: float = 100.0) -> tuple[bool, str]
 
 
 def check_grayscale(img_np: np.ndarray) -> tuple[bool, str]:
-    """Detect grayscale/IR images by checking channel similarity.
-
-    ArcFace is trained on color images; IR/grayscale degrades recognition.
-    """
+    """Detect grayscale-like content; this heuristic cannot identify IR sensors."""
     if img_np.ndim != 3 or img_np.shape[2] < 3:
         return False, "Grayscale (single channel)"
 
-    # Compare channel means — IR/grayscale has nearly identical R, G, B
-    means = img_np[:, :, :3].mean(axis=(0, 1))
-    max_diff = max(abs(means[0] - means[1]), abs(means[1] - means[2]), abs(means[0] - means[2]))
+    # Compare channels at each pixel, not global means (which can cancel).
+    rgb = img_np[:, :, :3].astype(np.float32)
+    max_diff = float(np.ptp(rgb, axis=2).mean())
 
     if max_diff < 5.0:
         return False, f"Grayscale/IR (channel diff={max_diff:.1f})"
@@ -96,6 +94,7 @@ def assess_quality(
     blur_threshold: float = 100.0,
     min_face_px: int = 100,
     min_confidence: float = 0.7,
+    reject_grayscale: bool = True,
 ) -> QualityResult:
     """Run all quality checks on an image.
 
@@ -110,13 +109,21 @@ def assess_quality(
     Returns:
         QualityResult with passed=True if all checks pass
     """
-    img_np = np.asarray(img)
+    img_np = np.asarray(img.convert("RGB"))
     reasons = []
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    measurements = {
+        "blur_variance": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+        "brightness": float(gray.mean()),
+        "channel_difference": float(np.ptp(img_np.astype(np.float32), axis=2).mean()),
+    }
+    if confidence is not None:
+        measurements["detection_confidence"] = float(confidence)
 
     # Run all checks, collect failures
     checks = [
         check_blur(img_np, blur_threshold),
-        check_grayscale(img_np),
+        check_grayscale(img_np) if reject_grayscale else (True, ""),
         check_exposure(img_np),
         check_confidence(confidence, min_confidence),
     ]
@@ -129,4 +136,4 @@ def assess_quality(
         if not passed:
             reasons.append(reason)
 
-    return QualityResult(passed=len(reasons) == 0, reasons=reasons)
+    return QualityResult(passed=len(reasons) == 0, reasons=reasons, measurements=measurements)

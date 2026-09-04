@@ -1,191 +1,201 @@
-<div align="center">
+# if-curator
 
-# 🖼️ if-curator
-### Immich to Frigate Curator
+Prepare representative face enrollment images from an Immich library for Frigate.
+The default exports **up to 30 natural face crops per person**, with quality measured
+on the intended face. Object preparation using SigLIP and YOLO is also available.
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Immich](https://img.shields.io/badge/Immich-v1.106%2B-violet?style=for-the-badge)](https://immich.app)
-[![Frigate](https://img.shields.io/badge/Frigate-Ready-green?style=for-the-badge)](https://frigate.video)
+## What this tool does
 
-*A specialized tool to extract **high-quality, diverse** training images from your Immich library for Frigate's Face Recognition (ArcFace) and Object/State Classification models.*
+Immich provides person labels and face bounding boxes. if-curator uses a local
+InsightFace Buffalo_L detector and recognition model to validate each target crop,
+remove near-duplicates and isolated outliers, and select representative medoids.
+It prepares each JPEG once, evaluates that exact image, and exports its bytes
+unchanged into a new run directory.
 
-</div>
+This prepares enrollment examples; it does not train or improve Frigate's upstream
+face detector or fine-tune ArcFace weights. Buffalo_L is a **curation proxy**, not
+Frigate's exact recognition pipeline. Its cosine distances are not Frigate
+confidence scores, and this tool does not certify recognition accuracy.
 
-> [!WARNING]
-> **Regarding Object Classification**
->
-> Frigate **does not support** uploading custom images for object classification training via the UI or API.
-> This tool currently prepares the dataset (crops and categorizes images) for training external models (like YOLO) manually.
+## Installation
 
----
-
-## ⚡ Why This Tool?
-
-> **"Diversity matters far more than volume."** — *Frigate Developer Tips*
-
-Training AI models on "bulk" data is often harmful. If you feed the model 50 images from the same 10-second video clip, it learns to recognize the *lighting and background*, not the actual *face* or *object*.
-
-`if-curator` solves this using **AI-powered diversity selection** and **quality filtering**:
-
-| Mode | Embedding Model | Algorithm |
-| :--- | :--- | :--- |
-| **👤 Face** | InsightFace (ArcFace) | K-Medoids Clustering + FPS + Hard Example Weighting |
-| **🐶 Object** | SigLIP (Vision Transformer) | K-Medoids Clustering + FPS |
-
-The pipeline uses **K-Medoids clustering** to guarantee coverage of every distinct "look", then fills the remaining budget with **Farthest Point Sampling (FPS)** biased toward **hard examples** (unusual angles, partial occlusions). An **adaptive threshold** stops selection automatically when adding more images becomes redundant.
-
----
-
-## ✨ Features
-
-### 🎯 Smart Selection
-- **Auto Diversity [Recommended]**: Clusters images by visual similarity, selects representatives from each cluster, then fills with maximally-diverse picks until redundancy starts (capped at 80)
-- **Standard (30 images)**: Balanced set using Smart Diversity
-- **Broad (100 images)**: Extensive set using Smart Diversity
-- **Custom Count**: You choose the limit
-
-### � Quality Filtering
-Bad training data hurts ArcFace models. Images are automatically rejected if they are:
-- **Blurry** — Laplacian variance below threshold
-- **Grayscale / IR** — ArcFace is trained on color images only
-- **Over/Underexposed** — Washed-out or too dark to use
-- **Low confidence** — Partial or occluded face detections
-- **Too small** — Faces under 100px (configurable) lack features
-
-### 👤 Face Recognition Prep
-- Uses **InsightFace** (ArcFace/Buffalo_L) embeddings on **face crops** (not full images — avoids wrong-face in group photos)
-- **Hard example prioritization** — unusual angles, sunglasses, and low-confidence detections are biased for selection
-- **Face alignment** via InsightFace landmarks (standard 112×112 ArcFace input)
-- Downloads **full-resolution** originals for final crops (falls back to JPEG preview for HEIC/RAW)
-- Configurable crop margin (default 15%)
-
-### 📦 Object/State Classification Prep
-- Uses **SigLIP** (Vision Transformer) embeddings for semantic diversity
-- **YOLOv9c** to detect and crop specific objects (dogs, cars, etc.)
-- Captures variation in poses, lighting, and backgrounds
-
-### ⚡ Performance
-- **Concurrent thumbnail downloads** (8 parallel workers)
-- **Batch-capable** SigLIP embeddings for GPU efficiency
-- Optional **disk-based embedding cache** for faster re-runs
-- **Multi-person batch mode** — process multiple people in one session
-
-### 📋 Preview Before Download
-After selection, a summary table shows what will be processed:
-```
-                📋 Training Job Preview
-┏━━━━━━━━━━━┳━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Person    ┃ Mode ┃ Images ┃ Date Range              ┃
-┡━━━━━━━━━━━╇━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ Sebastian │ face │     80 │ 2021-04-03 → 2026-02-18 │
-└───────────┴──────┴────────┴─────────────────────────┘
-```
-
----
-
-## 🚀 Installation
-
-### Prerequisites
-- **Python 3.12+**
-- **[uv](https://astral.sh/uv/)** (highly recommended)
-- **Immich Server** (v1.106+)
-
-### Setup
+Requires Python 3.12+, [uv](https://astral.sh/uv/), and an Immich API key able to read
+people, search assets, retrieve face metadata, and download originals/previews.
 
 ```bash
-git clone <repository_url>
-cd if-curator
 uv sync
+uv run if-curator
 ```
 
-### 🏎️ GPU Support (Recommended)
-For faster embedding computation, install with GPU extras:
+For GPU inference:
 
 ```bash
 uv sync --extra gpu
 ```
-*Automatically detects CUDA (NVIDIA), ROCm (AMD), or MPS (macOS).*
 
----
+ONNX Runtime selects available execution providers; CPU fallback is supported.
+The first face run needs the Buffalo_L model pack, downloaded by InsightFace if
+not already cached. Set `FORCE_CPU=true` to restrict inference to CPU.
 
-## 💻 Usage
+## Face workflow
 
-```bash
-uv run if-curator
-```
+1. Select an Immich person, face mode, and date range.
+2. Choose **Diverse (up to 30)**, **Starter (up to 5)**, or a custom positive count.
+   Custom counts can use representative diversity or explicit time spread.
+3. The tool prepares and evaluates candidates before showing the selection summary.
+4. Review selected/prepared/rejected counts, then export the prepared images.
+5. Add another person within the same run when needed.
 
-### Interactive Flow
-The tool will guide you through:
-1.  **Select Person** — Choose from your Immich people (supports multi-person batch)
-2.  **Training Mode** — Face (Recognition) or Object (Classification)
-3.  **Strategy** — Auto, Standard, Broad, or Custom
-4.  **Preview** — Review the selection summary before downloading
-5.  **Execute** — Downloads and processes images with progress tracking
+Counts are ceilings. A shortage never relaxes quality gates or fills from rejected
+images. Local face detection remains mandatory in time-spread mode. Model or
+selection failure never silently falls back to an unfiltered face export.
+
+### Preparation and quality
+
+- Metadata must identify exactly one face for the requested person. If nested
+  asset metadata is incomplete, the tool retrieves `/api/faces?id=…`. Asset searches
+  explicitly request people metadata to avoid unnecessary per-asset requests.
+- A local detection must match that target box with intersection-over-union of at
+  least 0.5. Missing or ambiguous matches are rejected, including montages with
+  multiple faces assigned to the same person.
+- Originals are fully decoded, EXIF-oriented, and converted to RGB. Unsupported
+  formats and failed original downloads fall back to a JPEG preview.
+- Coordinates are scaled to the decoded representation. Invalid, incomplete, or
+  incompatible boxes are rejected. Assets marked as edited are conservatively
+  rejected because their box/original coordinate relationship is not yet verified.
+- Both effective face dimensions must be at least 100 pixels **before** margin,
+  resizing, or alignment. Preview fallback must independently satisfy this rule.
+- Natural-resolution crops have a 15% margin by default. Optional 112×112 alignment
+  uses local landmarks, followed by validation of the resulting encoded crop.
+  Target landmarks are projected through that transform; the tight aligned crop
+  does not undergo a second detector pass. Its detection confidence comes from
+  the matched face before alignment.
+- Blur, exposure, and grayscale checks operate on the face region of the encoded
+  JPEG, excluding the margin/background. Grayscale detection compares channels at
+  each pixel, rather than comparing global channel averages.
+- Detection confidence comes from the matched local detector. Public Immich face
+  metadata is not assumed to provide confidence, landmarks, or embeddings.
+
+The manifest records measured sharpness, brightness, channel differences, and
+local detection confidence. These are quality heuristics; the tool does not claim
+to measure occlusion or landmark confidence.
+
+### Representative selection
+
+Smart face selection uses the following sequence:
+
+1. Apply all geometry and quality gates and validate the 512-dimensional embedding.
+2. Remove near-duplicates whose normalized cosine distance is below `0.05`, retaining
+   the candidate with better detection confidence, then sharpness, then resolution.
+3. With at least ten remaining candidates, measure mean distance to each face's five
+   nearest neighbors. Reject isolated candidates above the median plus three scaled
+   median absolute deviations (MAD scale factor 1.4826). Skip this gate when the
+   dispersion is zero.
+4. Choose up to the requested number with deterministic K-Medoids, reducing total
+   cosine distance to representatives. Stable IDs break remaining quality ties.
+
+There is no farthest-point filling, low-confidence boost, or fixed 80/20 allocation
+for face mode. Supported appearance variations can remain represented without
+rewarding rarity alone. Thresholds are configurable heuristics, not calibrated
+Frigate recognition thresholds. Incorrect Immich labels and coherent groups of
+mislabeled faces may still pass; visually review enrollment images.
+
+Explicit time spread selects only from quality-approved, successfully embedded
+faces; it does not apply smart duplicate/isolation filtering.
+
+### Output and reruns
+
+Each run receives a unique timestamp/ID directory:
 
 ```text
-Using InsightFace (face embeddings) for diversity analysis...
-Quality filtering removed 76 images.
-Adaptive threshold: 0.1721 (median_dist=0.8605, fraction=0.2)
-Clustering 223 embeddings into 20 groups (K-Medoids)...
-Selected 20 cluster medoids as initial picks.
-Selection complete: 80 images (0 hard examples with confidence < 0.85).
+frigate_train/
+  20260904T123000000000Z-abcd1234/
+    manifest.json
+    Person-<identity-hash>/
+      000.jpg
+      001.jpg
 ```
 
----
+Folder suffixes distinguish people with identical names. Consult the manifest for
+original person names and IDs when enrolling images in Frigate.
 
-## 🛠️ Configuration
+During preparation, a hidden `.<run-id>.incomplete` directory holds staged crops
+and the manifest. A completed run is published by renaming its directory. Failed,
+interrupted, or cancelled runs remain marked incomplete; they are not enrollment
+sets. Prior runs and existing manually curated images are never overwritten or
+cleaned automatically. Temporary prepared crops are removed when publishing;
+rejection reasons remain in the manifest.
 
-The tool prompts for your Immich URL and API Key on the first run and saves them to `.immich_config.json`.
+The versioned manifest includes processing settings (excluding credentials), model
+fingerprint, candidate provenance, source/effective dimensions, quality scores,
+selection and rejection reasons, output paths, and SHA-256 hashes. Up to 3,000 assets
+per person are sampled evenly through time; excluded assets are recorded. Downloads
+use windows of eight workers and stage decoded sources on disk, keeping full-size
+images out of the in-memory candidate collection. Preparation can require substantial
+network traffic; `USE_FULL_RESOLUTION=false` uses previews with the same gates.
 
-### Environment Variables
+## Configuration
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `IMMICH_URL` | — | Full URL to Immich (e.g. `http://192.168.1.10:2283`) |
-| `API_KEY` | — | Your Immich API Key |
-| `FORCE_CPU` | `false` | Disable GPU acceleration |
-| `MIN_FACE_WIDTH` | `100` | Minimum face crop size (pixels) |
-| `BLUR_THRESHOLD` | `100.0` | Laplacian variance threshold for blur detection |
-| `MIN_CONFIDENCE` | `0.7` | Minimum Immich detection confidence |
-| `MAX_AUTO_IMAGES` | `80` | Safety cap for auto-diversity mode |
-| `FACE_MARGIN` | `0.15` | Crop margin around face (fraction) |
-| `USE_FULL_RESOLUTION` | `true` | Download originals for final crops |
-| `ENABLE_FACE_ALIGNMENT` | `true` | Align faces to ArcFace 112×112 format |
-| `ENABLE_CACHE` | `false` | Cache embeddings to disk for faster re-runs |
-| `CACHE_DIR` | `.if_cache` | Directory for embedding cache |
+The first run prompts for `IMMICH_URL` and `API_KEY` and stores connection details
+in `.immich_config.json`. Environment values override saved connection settings.
+Processing settings come from the environment (including `.env`) or these defaults.
 
----
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `IMMICH_URL` | required | Immich server URL |
+| `API_KEY` | required | Immich API key |
+| `OUTPUT_DIR` | `./frigate_train` | Parent directory for isolated runs |
+| `YEARS_FILTER` | `10` | Default age cutoff in years |
+| `FORCE_CPU` | `false` | Restrict inference to CPU |
+| `MIN_FACE_WIDTH` | `100` | Minimum effective width **and height** before resizing |
+| `BLUR_THRESHOLD` | `100.0` | Minimum face-region Laplacian variance |
+| `MIN_CONFIDENCE` | `0.7` | Minimum matched local detection confidence |
+| `FACE_MAX_IMAGES` | `30` | Default face selection ceiling |
+| `FACE_DUPLICATE_DISTANCE` | `0.05` | Smart cosine-distance duplicate threshold; 0 disables removal |
+| `FACE_OUTLIER_MAD` | `3.0` | Smart isolation threshold multiplier |
+| `REJECT_GRAYSCALE` | `true` | Reject grayscale enrollment crops |
+| `FACE_MARGIN` | `0.15` | Margin on each side as a fraction of face size |
+| `USE_FULL_RESOLUTION` | `true` | Prefer originals, with preview fallback |
+| `ENABLE_FACE_ALIGNMENT` | `false` | Export locally aligned 112×112 crops instead of natural crops |
+| `ENABLE_CACHE` | `false` | Cache embeddings on disk |
+| `CACHE_DIR` | `.if_cache` | Embedding cache directory |
+| `MAX_AUTO_IMAGES` | `80` | **Object-mode only** auto-selection ceiling |
 
-## 🧠 Technical Details
+Booleans accept `true/false`, `yes/no`, or `1/0`. Invalid settings fail validation.
+Face cache keys include person/face/asset identity, encoded-image hash, model-file
+fingerprint, and preprocessing version. Old face cache entries are ignored; caching
+does not bypass current quality validation or eliminate image downloads.
 
-### Models
-- **InsightFace (Buffalo_L)** — Face detection and embedding (ArcFace, 512-d)
-- **SigLIP** — Visual embeddings via `transformers` (google/siglip-base-patch16-224, 768-d)
-- **YOLOv9c** — Object detection for cropping
+## Using the results with Frigate
 
-### Algorithms
-- **K-Medoids Clustering** — Groups embeddings into k clusters using cosine distance, selecting actual data points (medoids) as cluster centers. Guarantees one representative from every distinct "look"
-- **Farthest Point Sampling** — After medoid selection, fills remaining budget by iteratively selecting the most distant point from the current set
-- **Hard Example Weighting** — Candidates with detection confidence < 0.85 get a 1.2–1.5× distance boost, biasing selection toward challenging images (unusual angles, occlusions)
-- **Adaptive Auto-Threshold** — Computed as 20% of the median pairwise cosine distance; stops when the next-best image is too similar
-- **Quality Filtering** — Blur (Laplacian), grayscale/IR (channel comparison), exposure (histogram), confidence (Immich metadata)
-- **Face Crop Embedding** — Extracts the target person's face (using Immich bbox) before embedding, preventing wrong-face selection in group photos
+[Frigate's guidance](https://docs.frigate.video/configuration/face_recognition/)
+recommends starting with 1–5 clear frontal images, then expanding methodically with
+correctly labeled camera examples. The Starter preset limits count; it does not
+certify frontal pose, so review the selected crops. The default diverse set is a
+pool of up to 30 enrollment candidates, not a recommendation to import all at once.
 
-### Architecture
+Frigate's large ArcFace pipeline uses its own model and alignment/scoring; its small
+mode uses FaceNet. Immich's person clustering has a different purpose again.
+Recognition performance on camera imagery requires evaluation in that environment.
+This iteration does not connect to Frigate, compare household identities, import
+camera attempts, or run a Frigate holdout benchmark.
+
+## Object mode
+
+Object mode retains SigLIP embeddings, K-Medoids plus farthest-point selection,
+and YOLO object cropping. Its existing Auto, Standard, Broad, and Custom strategies
+are separate from face policies. Exports use the same isolated run directories.
+All face/object loaders share EXIF correction and RGB decoding. Older SigLIP cache
+entries are ignored because their embeddings may reflect uncorrected orientation.
+This prepares images for external workflows; it does not upload or train a custom
+Frigate object detector.
+
+## Development
+
+```bash
+uv sync --locked
+uv run pytest -q
+uv run ruff check .
 ```
-Immich API ─► Fetch Assets by Person ─► Time Filter
-                                            │
-                                  Concurrent Thumbnail Download (8 workers)
-                                            │
-                                  Quality Filtering (blur, IR, exposure...)
-                                            │
-                                  Face Crop Extraction (bbox from Immich metadata)
-                                            │
-                                  Compute Embeddings (InsightFace / SigLIP)
-                                            │
-                                  K-Medoids Clustering → FPS + Hard Example Weighting
-                                            │
-                                  Preview Summary Table
-                                            │
-                                  Download Full-Res ─► Face Alignment ─► Save
-```
+
+Tests mock APIs and embeddings so they run without network access or model downloads.
