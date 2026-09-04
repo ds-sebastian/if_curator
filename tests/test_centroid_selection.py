@@ -128,3 +128,60 @@ def test_unknown_score_configuration_must_be_below_recognition(monkeypatch):
     monkeypatch.setattr(Config, "FRIGATE_UNKNOWN_SCORE", 0.95)
     with pytest.raises(ValueError, match="must not exceed"):
         Config.validate_settings()
+
+
+def test_manifest_counts_separate_prepared_quality_eligible_and_selected(tmp_path):
+    records = [candidate(i) for i in range(4)]
+    for c in records:
+        c.prepared_path = tmp_path / f"{c.asset_id}.jpg"
+    records[0].embedding = None
+    records[0].reasons = ["Blurry"]
+    records[1].image_hash = records[2].image_hash = "same-photo"
+    j = job(records)
+    select_jobs([j])
+    assert j["selection_report"]["counts"] == dict(
+        scanned=4,
+        prepared=4,
+        quality_passed=3,
+        duplicate_captures=1,
+        isolated_outliers=0,
+        eligible=2,
+        selected=1,
+        not_selected=1,
+        rejected=2,
+    )
+    assert j["selection_report"]["stop_reason"] == "no_objective_improvement"
+
+
+@pytest.mark.parametrize(
+    "count,limit,expected", [(0, 30, "no_eligible_faces"), (1, 30, "eligible_pool_exhausted"), (3, 1, "count_ceiling")]
+)
+def test_selection_stop_reason(count, limit, expected):
+    j = job([candidate(i) for i in range(count)], limit)
+    select_jobs([j])
+    assert j["selection_report"]["stop_reason"] == expected
+
+
+def test_preview_does_not_equate_prepared_images_with_approved_faces(tmp_path, monkeypatch):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from if_curator import cli
+
+    records = [candidate(0), candidate(1)]
+    for c in records:
+        c.prepared_path = tmp_path / f"{c.asset_id}.jpg"
+    records[1].reasons = ["Blurry"]
+    records[1].embedding = None
+    j = job(records)
+    j["person"]["name"] = "Test Person"
+    j["assets"] = []
+    select_jobs([j])
+    output = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=output, width=160, color_system=None))
+    cli._show_preview([j])
+    text = output.getvalue()
+    assert "Quality passed" in text and "Eligible" in text
+    assert "Prepared" not in text
+    assert "eligible pool exhausted" in text

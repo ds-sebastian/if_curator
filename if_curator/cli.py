@@ -247,8 +247,9 @@ def _show_preview(jobs: list[dict]) -> None:
     table.add_column("Person", style="bold")
     table.add_column("Mode", style="dim")
     table.add_column("Selected", justify="right")
-    table.add_column("Prepared", justify="right")
-    table.add_column("Rejected / not selected", justify="right")
+    table.add_column("Scanned", justify="right")
+    table.add_column("Quality passed", justify="right")
+    table.add_column("Eligible", justify="right")
     table.add_column("Date Range", style="dim")
 
     for job in jobs:
@@ -261,26 +262,32 @@ def _show_preview(jobs: list[dict]) -> None:
         date_range = f"{dates[0]} → {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "—")
 
         candidates = job.get("candidates", [])
-        prepared = sum(c.prepared_path is not None for c in candidates)
-        rejected = sum(bool(c.reasons) for c in candidates)
+        counts = job.get("selection_report", {}).get("counts", {})
         table.add_row(
             name,
             mode,
             count,
-            str(prepared) if mode == "face" else "—",
-            str(rejected) if mode == "face" else "—",
+            str(len(candidates)) if mode == "face" else "—",
+            str(counts.get("quality_passed", 0)) if mode == "face" else "—",
+            str(counts.get("eligible", 0)) if mode == "face" else "—",
             date_range,
         )
 
     console.print()
     console.print(table)
+    if any("selection_report" in job for job in jobs):
+        console.print(
+            "[dim]Eligible = quality passed after duplicate and isolation filtering. "
+            "Reference cosine is not independent recognition confidence.[/dim]"
+        )
     for job in jobs:
         report = job.get("selection_report")
         if report:
             console.print(
                 f"{job['person']['name']}: {report['reference_source']}; "
                 f"centroid/reference cosine {report['centroid_reference_cosine']}; "
-                f"{job['limit']} / {job['requested_limit']} images"
+                f"{job['limit']} / {job['requested_limit']} images; "
+                f"{report['stop_reason'].replace('_', ' ')}"
             )
     console.print()
 

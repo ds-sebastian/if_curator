@@ -7,6 +7,11 @@ the intended face; Frigate ArcFace provides the embeddings used for selection.
 
 ## Preparation and quality
 
+Local target detection uses a **320×320 model input** for tight face crops. This keeps
+large faces in SCRFD’s useful detection range; the encoded crop remains at its natural
+resolution. The 0.7 confidence gate, 0.5 target IoU, and face-region quality checks are
+unchanged. The input size and preprocessing version are recorded in the run manifest.
+
 | Stage | Rule |
 | --- | --- |
 | **Identity** | Metadata must identify exactly one face for the requested person. If nested asset metadata is incomplete, the tool retrieves `/api/faces?id=…`. Asset searches explicitly request people metadata to avoid unnecessary per-asset requests. |
@@ -75,3 +80,23 @@ Temporary prepared crops are removed when a completed run is published. The vers
 manifest retains candidate provenance, source/effective dimensions, measurements,
 selection and rejection reasons, model fingerprints, output paths and SHA-256 hashes.
 Processing settings are recorded without connection credentials.
+
+## Understanding a small selection
+
+The preview separates these stages:
+
+| Count | Meaning |
+| --- | --- |
+| Scanned | Assets considered for this person |
+| Quality passed | Faces that passed preparation, target association, quality checks and embedding |
+| Eligible | Quality-passed faces remaining after capture deduplication and isolation filtering |
+| Selected | Faces chosen by the requested strategy |
+
+A prepared JPEG may still fail detection or quality checks, so the number of temporary
+JPEGs does not describe the selection pool. The manifest records all stage counts,
+rejections, eligible-but-unselected candidates, and why selection stopped.
+
+One selected face may mean only one was eligible, or that no tested addition improved
+the objective. A reference cosine of 1 in a one-face pool is a self-comparison, not
+independent recognition confidence. Use candidate rejection reasons to diagnose a
+shortage before changing quality thresholds.

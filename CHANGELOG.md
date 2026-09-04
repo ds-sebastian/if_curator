@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-04
+
+### Fixed
+
+- Evaluate tight face crops with a 320×320 SCRFD input instead of the full-photo
+  640×640 scale. Oversized detector inputs caused valid faces to be missed or receive
+  artificially low confidence, sometimes leaving only one eligible enrollment image.
+  Confidence, target-overlap, resolution, exposure, and blur thresholds are unchanged.
+- Distinguish scanned assets, quality-passed faces, eligible candidates, and selected
+  images in the preview. A prepared JPEG is no longer presented as an approved face.
+- Record stage counts, detector input size, and selection stop reasons in manifests.
+  Clarify that reference cosine is not independent recognition confidence, and clamp
+  displayed centroid/reference cosine to its valid numerical range.
+- Bump the preprocessing version so previous cached processing cannot obscure the fix.
+
 ## [0.2.0] - 2026-09-04
 
 ### Highlights

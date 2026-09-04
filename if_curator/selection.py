@@ -242,7 +242,18 @@ def select_jobs(jobs, samples=()):
             "algorithm": "frigate_centroid_add_swap_remove_v1" if mode == "smart" else "quality_filtered_time_spread",
             "reference_source": "camera_reference" if refs else "immich_capture_day_balanced_proxy",
             "reference_count": len(refs) if refs else len(pool),
-            "quality_approved_pool": len(pool),
+            "quality_approved_pool": len(pool),  # Retained for manifest compatibility; post-selection gates.
+            "counts": {
+                "scanned": len(job["candidates"]),
+                "prepared": sum(c.prepared_path is not None for c in job["candidates"]),
+                "quality_passed": sum(
+                    c.embedding is not None and all(r in SELECTION_REASONS for r in c.reasons)
+                    for c in job["candidates"]
+                ),
+                "duplicate_captures": sum("duplicate_capture" in c.reasons for c in job["candidates"]),
+                "isolated_outliers": sum("isolated_outlier" in c.reasons for c in job["candidates"]),
+                "eligible": len(pool),
+            },
             "objective_history": [],
             "scope": "local heuristic; no camera accuracy claim without independent test samples",
         }
@@ -323,9 +334,24 @@ def select_jobs(jobs, samples=()):
         if "assets" in job:
             job["assets"] = [a for a in job["assets"] if a["id"] in selected_ids]
         report = job["selection_report"]
+        report["counts"]["selected"] = len(selected)
+        report["counts"]["not_selected"] = len(pools[p]) - len(selected)
+        report["counts"]["rejected"] = len(job["candidates"]) - len(pools[p])
+        if not pools[p]:
+            report["stop_reason"] = "no_eligible_faces"
+        elif len(selected) >= job["requested_limit"]:
+            report["stop_reason"] = "count_ceiling"
+        elif len(selected) == len(pools[p]):
+            report["stop_reason"] = "eligible_pool_exhausted"
+        elif report.get("iteration_cap_reached"):
+            report["stop_reason"] = "iteration_cap"
+        else:
+            report["stop_reason"] = "no_objective_improvement"
         report["initial_joint_objective"] = initial_loss
         report["final_joint_objective"] = objective(centers, references, validation)
-        report["centroid_reference_cosine"] = float(unit(centers[p]) @ references[p]) if selected else None
+        report["centroid_reference_cosine"] = (
+            float(np.clip(unit(centers[p]) @ references[p], -1, 1)) if selected else None
+        )
         report["leave_one_out"] = []
         for i, c in enumerate(selected):
             row = {"asset_id": c.asset_id, "cosine": None, "confidence": None, "identity_margin": None}
