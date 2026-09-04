@@ -13,7 +13,7 @@ from .diversity import select_diverse_assets
 from .embeddings import is_embedding_available
 from .faces import FacePipelineError, prepare_face_candidates, select_face_candidates
 from .image_processing import process_full_mode, process_object_mode
-from .immich_api import fetch_all_assets, fetch_full_image, filter_recent_assets, get_people
+from .immich_api import fetch_all_assets, fetch_full_image, fetch_preview_image, filter_recent_assets, get_people
 from .logging import console, setup_logging
 from .runs import RunWorkspace, person_directory
 
@@ -289,12 +289,10 @@ def execute_jobs(jobs: list[dict], workspace: RunWorkspace | None = None):
                 directory.mkdir(exist_ok=False)
                 job["object_outputs"] = []
                 for count, asset in enumerate(job["assets"]):
-                    from .immich_api import fetch_image_source
-
                     image = (
                         fetch_full_image(asset["id"])
                         if Config.USE_FULL_RESOLUTION
-                        else (fetch_image_source(asset["id"], False)[0])
+                        else fetch_preview_image(asset["id"])
                     )
                     if image is None:
                         raise ValueError(f"Could not download asset {asset['id']}")

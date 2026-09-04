@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Model versions — bump these when the upstream model changes
 MODEL_VERSIONS = {
     "insightface": "buffalo_l_v1",
-    "siglip": "siglip-base-patch16-224_v1",
+    "siglip": "siglip-base-patch16-224_exif_rgb_v2",
     "immich": "immich_buffalo_l_v1",
 }
 

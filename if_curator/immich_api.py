@@ -71,39 +71,21 @@ def fetch_all_assets(person: dict) -> list[dict]:
 
 
 def fetch_full_image(asset_id: str, timeout: int = 60) -> Image.Image | None:
-    """Fetch full-resolution image from Immich, falling back to preview thumbnail.
-
-    The /original endpoint may return HEIC, RAW, or video files that PIL
-    cannot open directly. In that case, we fall back to the JPEG thumbnail.
-    """
-    # Try original first
+    """Compatibility wrapper: decoded, oriented RGB original with preview fallback."""
     try:
-        resp = requests.get(
-            f"{Config.IMMICH_URL}/api/assets/{asset_id}/original",
-            headers=get_headers(),
-            timeout=timeout,
-        )
-        if resp.ok:
-            try:
-                return Image.open(BytesIO(resp.content))
-            except Exception:
-                logger.debug(f"PIL can't open original for {asset_id}, falling back to preview")
-    except requests.RequestException:
-        logger.debug(f"Original request failed for {asset_id}, falling back to preview")
+        return fetch_image_source(asset_id, timeout=timeout)[0]
+    except ValueError:
+        logger.error("Failed to fetch image %s", asset_id)
+        return None
 
-    # Fall back to preview thumbnail (always JPEG)
+
+def fetch_preview_image(asset_id: str, timeout: int = 30) -> Image.Image | None:
+    """Fetch a decoded, oriented RGB preview through the shared image loader."""
     try:
-        resp = requests.get(
-            f"{Config.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG",
-            headers=get_headers(),
-            timeout=30,
-        )
-        if resp.ok:
-            return Image.open(BytesIO(resp.content))
-    except Exception as e:
-        logger.error(f"Failed to fetch image {asset_id}: {e}")
-
-    return None
+        return fetch_image_source(asset_id, use_original=False, preview_timeout=timeout)[0]
+    except ValueError:
+        logger.error("Failed to fetch preview %s", asset_id)
+        return None
 
 
 def filter_recent_assets(assets: list[dict], years: int | None = None) -> list[dict]:
@@ -155,7 +137,13 @@ def resolve_face_metadata(asset: dict, person_id: str) -> dict:
     return matches[0]
 
 
-def fetch_image_source(asset_id: str, use_original: bool = True) -> tuple[Image.Image, str]:
+def fetch_image_source(
+    asset_id: str,
+    use_original: bool = True,
+    *,
+    timeout: int = 60,
+    preview_timeout: int = 30,
+) -> tuple[Image.Image, str]:
     """Fully decode and orient an image before declaring a download successful."""
     from PIL import ImageOps
 
@@ -165,7 +153,11 @@ def fetch_image_source(asset_id: str, use_original: bool = True) -> tuple[Image.
     endpoints.append((f"/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG", "preview"))
     for endpoint, source in endpoints:
         try:
-            resp = requests.get(f"{Config.IMMICH_URL}{endpoint}", headers=get_headers(), timeout=60)
+            resp = requests.get(
+                f"{Config.IMMICH_URL}{endpoint}",
+                headers=get_headers(),
+                timeout=timeout if source == "original" else preview_timeout,
+            )
             resp.raise_for_status()
             with Image.open(BytesIO(resp.content)) as image:
                 image.load()

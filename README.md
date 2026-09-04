@@ -53,7 +53,8 @@ selection failure never silently falls back to an unfiltered face export.
 ### Preparation and quality
 
 - Metadata must identify exactly one face for the requested person. If nested
-  asset metadata is incomplete, the tool retrieves `/api/faces?id=…`.
+  asset metadata is incomplete, the tool retrieves `/api/faces?id=…`. Asset searches
+  explicitly request people metadata to avoid unnecessary per-asset requests.
 - A local detection must match that target box with intersection-over-union of at
   least 0.5. Missing or ambiguous matches are rejected, including montages with
   multiple faces assigned to the same person.
@@ -184,6 +185,8 @@ camera attempts, or run a Frigate holdout benchmark.
 Object mode retains SigLIP embeddings, K-Medoids plus farthest-point selection,
 and YOLO object cropping. Its existing Auto, Standard, Broad, and Custom strategies
 are separate from face policies. Exports use the same isolated run directories.
+All face/object loaders share EXIF correction and RGB decoding. Older SigLIP cache
+entries are ignored because their embeddings may reflect uncorrected orientation.
 This prepares images for external workflows; it does not upload or train a custom
 Frigate object detector.
 

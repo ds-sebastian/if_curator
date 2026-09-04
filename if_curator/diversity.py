@@ -1,14 +1,13 @@
 """Object diversity selection and shared K-Medoids; faces use the target-bound pipeline."""
 
 import logging
-from io import BytesIO
 
 import numpy as np
-import requests
 from PIL import Image
 
-from .config import Config, get_headers
+from .config import Config
 from .embeddings import get_embedding, is_embedding_available
+from .immich_api import fetch_preview_image
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +71,8 @@ def select_diverse_assets(
 
 
 def _fetch_thumbnail(asset_id: str, timeout: int = 10) -> Image.Image | None:
-    """Fetch thumbnail from Immich API."""
-    try:
-        url = f"{Config.IMMICH_URL}/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG"
-        resp = requests.get(url, headers=get_headers(), timeout=timeout)
-        return Image.open(BytesIO(resp.content)) if resp.ok else None
-    except Exception:
-        return None
+    """Fetch the same oriented RGB previews used by other image consumers."""
+    return fetch_preview_image(asset_id, timeout=timeout)
 
 
 # =============================================================================

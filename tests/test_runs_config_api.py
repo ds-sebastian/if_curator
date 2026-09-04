@@ -227,3 +227,56 @@ def test_asset_search_requests_people_and_uses_inline_faces(monkeypatch):
     assert post.call_args.kwargs["json"] == {"personIds": ["person"], "size": 1000, "page": 1, "withPeople": True}
     assert immich_api.resolve_face_metadata(assets[0], "person") == metadata
     get.assert_not_called()
+
+
+@pytest.mark.parametrize("loader_name", ["fetch_full_image", "fetch_preview_image", "_fetch_thumbnail"])
+def test_all_image_loaders_share_orientation_rgb_and_timeouts(monkeypatch, loader_name):
+    from if_curator import diversity
+
+    encoded = BytesIO()
+    photo = Image.new("L", (100, 200), 100)
+    exif = Image.Exif()
+    exif[274] = 6
+    photo.save(encoded, format="JPEG", exif=exif)
+    get = Mock(return_value=response(encoded.getvalue()))
+    monkeypatch.setattr(immich_api.requests, "get", get)
+    module = diversity if loader_name == "_fetch_thumbnail" else immich_api
+    decoded = getattr(module, loader_name)("asset", timeout=7)
+    assert decoded.size == (200, 100) and decoded.mode == "RGB"
+    assert get.call_args.kwargs["timeout"] == 7
+    assert decoded.getexif().get(274, 1) == 1
+    assert ("/original" in get.call_args.args[0]) == (loader_name == "fetch_full_image")
+
+
+def test_shared_loader_fallback_preserves_source_and_separate_timeouts(monkeypatch, image):
+    encoded = BytesIO()
+    image.save(encoded, format="PNG")
+    get = Mock(side_effect=[response(b"bad original"), response(encoded.getvalue())])
+    monkeypatch.setattr(immich_api.requests, "get", get)
+    decoded, source = immich_api.fetch_image_source("asset", timeout=11, preview_timeout=3)
+    assert source == "preview" and decoded.size == image.size
+    assert [call.kwargs["timeout"] for call in get.call_args_list] == [11, 3]
+
+
+@pytest.mark.parametrize("loader_name", ["fetch_full_image", "fetch_preview_image", "_fetch_thumbnail"])
+def test_legacy_loader_failure_contract(monkeypatch, loader_name):
+    from if_curator import diversity
+
+    monkeypatch.setattr(immich_api.requests, "get", Mock(return_value=response(b"invalid")))
+    module = diversity if loader_name == "_fetch_thumbnail" else immich_api
+    assert getattr(module, loader_name)("asset") is None
+    with pytest.raises(ValueError, match="image_download_or_decode_failed"):
+        immich_api.fetch_image_source("asset")
+
+
+def test_siglip_cache_ignores_embeddings_from_unoriented_images(tmp_path):
+    import numpy as np
+
+    from if_curator.cache import EmbeddingCache
+
+    cache = EmbeddingCache(str(tmp_path))
+    embedding = np.ones(768)
+    cache.put("asset", embedding, "siglip-base-patch16-224_v1")
+    assert cache.get("asset", "siglip") is None
+    cache.put("asset", embedding, "siglip")
+    np.testing.assert_array_equal(cache.get("asset", "siglip"), embedding)
