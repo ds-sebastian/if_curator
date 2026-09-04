@@ -5,6 +5,7 @@ The upstream ndarray path deliberately preserves BGR channel order, even inside 
 """
 
 import hashlib
+import logging
 import math
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,9 @@ from PIL import Image
 from PIL import __version__ as pillow_version
 
 from .config import Config
+from .onnx_runtime import preload_cuda
+
+logger = logging.getLogger(__name__)
 
 PROFILE = "frigate-0.17.2-large-v1"
 MODEL_URL = "https://github.com/NickM-27/facenet-onnx/releases/download/v1.0/"
@@ -138,7 +142,12 @@ class FrigateModel:
         providers = ["CPUExecutionProvider"]
         if not force_cpu and "CUDAExecutionProvider" in ort.get_available_providers():
             providers.insert(0, "CUDAExecutionProvider")
+        preload_cuda(ort, providers)
         self.session = ort.InferenceSession(str(arcface), providers=providers)
+        active = self.session.get_providers()
+        logger.info("Frigate ArcFace active providers: %s", active)
+        if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in active:
+            logger.warning("Frigate ArcFace could not activate CUDA; using %s", active)
         self.fingerprint = (
             PROFILE
             + ":"

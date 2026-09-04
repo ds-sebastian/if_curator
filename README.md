@@ -95,6 +95,18 @@ uv run --extra gpu if-curator
 
 ONNX Runtime selects available execution providers; CPU fallback is supported.
 Set `FORCE_CPU=true` to restrict inference to CPU.
+CUDA libraries supplied by the installed NVIDIA packages are preloaded before ONNX
+sessions are created; importing PyTorch first or installing a system CUDA toolkit
+is not required for the locked environment. Startup logs show active model providers.
+
+If uv warns that `VIRTUAL_ENV` points to another project, leave that environment or
+clear the stale variable for this invocation (Linux/macOS):
+
+```bash
+env -u VIRTUAL_ENV uv run --extra gpu if-curator
+```
+
+uv otherwise ignores that stale variable and uses this project's `.venv`.
 
 </details>
 
