@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from .cache import get_cache
+from .onnx_runtime import preload_cuda
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,8 @@ def get_insightface_app():
         providers = [p for p in ort.get_available_providers() if p != "TensorrtExecutionProvider"]
         if _is_force_cpu():
             providers = ["CPUExecutionProvider"]
-        logger.info(f"Available ONNX providers: {providers}")
+        logger.info(f"Requested ONNX providers: {providers}")
+        preload_cuda(ort, providers)
 
         # Determine device: 0 for GPU, -1 for CPU
         gpu_providers = {
@@ -68,6 +70,10 @@ def get_insightface_app():
             app.prepare(ctx_id=ctx_id, det_size=(640, 640))
             _insightface_app = app
 
+        active = app.det_model.session.get_providers()
+        logger.info("InsightFace detector active providers: %s", active)
+        if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in active:
+            logger.warning("InsightFace could not activate CUDA; using %s", active)
         return _insightface_app
 
     except ImportError as exc:
