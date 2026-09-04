@@ -156,7 +156,7 @@ def test_prepare_rejects_edits_and_reports_provenance(tmp_path, image, metadata,
     monkeypatch.setattr(faces, "resolve_face_metadata", lambda *a: metadata)
     monkeypatch.setattr(faces, "fetch_image_source", lambda *a: (image.copy(), "preview"))
     records, fp = faces.prepare_face_candidates([{"id": "good"}, {"id": "edited", "isEdited": True}], "p", tmp_path)
-    assert fp == "test-fingerprint"
+    assert fp == "test-fingerprint:frigate-test"
     good = next(c for c in records if c.asset_id == "good")
     assert good.source == "preview" and good.embedding is not None
     bad = next(c for c in records if c.asset_id == "edited")

@@ -27,12 +27,12 @@ class RunWorkspace:
         self.destination = root / self.run_id
         self.path.mkdir()
         self.manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": self.run_id,
             "status": "preparing",
             "configuration": Config.snapshot(),
             "preprocessing_version": PREPROCESSING_VERSION,
-            "embedding_backend": "InsightFace Buffalo_L (curation proxy)",
+            "embedding_backend": "Frigate 0.17.2 large ArcFace; InsightFace target detection",
             "jobs": [],
         }
         self.write_manifest()
@@ -55,6 +55,7 @@ class RunWorkspace:
                 "mode": job["config"]["mode"],
                 "model_fingerprint": job.get("model_fingerprint"),
                 "selection_mode": job.get("selection_mode"),
+                "selection_report": job.get("selection_report"),
                 "requested_limit": job.get("requested_limit", job["limit"]),
                 "years_filter": job.get("years_filter"),
                 "selected_count": job["limit"],

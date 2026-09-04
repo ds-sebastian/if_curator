@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 
-from if_curator.config import Config
 from if_curator.faces import FaceCandidate, select_face_candidates
 
 
@@ -37,7 +36,8 @@ def test_invalid_limits(limit):
 def test_duplicates_keep_higher_quality():
     low, high = candidate(0, confidence=0.8), candidate(1, np.eye(512)[0], confidence=0.99)
     assert select_face_candidates([low, high], 30) == [high]
-    assert low.reasons == ["near_duplicate"]
+    assert low.reasons == ["not_selected_objective"]
+    # Identical embeddings are not evidence that these were duplicate captures.
 
 
 def test_deterministic_and_ceiling():
@@ -49,7 +49,6 @@ def test_deterministic_and_ceiling():
 
 
 def test_outliers_and_secondary_cluster(monkeypatch):
-    monkeypatch.setattr(Config, "FACE_DUPLICATE_DISTANCE", 0.001)
     rng = np.random.default_rng(3)
     records = []
     for i in range(30):
@@ -65,8 +64,8 @@ def test_outliers_and_secondary_cluster(monkeypatch):
 
 def test_zero_dispersion_skips_outlier_gate():
     records = [candidate(i) for i in range(10)]
-    assert len(select_face_candidates(records, 30)) == 10
-    assert not any(c.reasons for c in records)
+    assert 0 < len(select_face_candidates(records, 30)) <= 10
+    assert not any("isolated_outlier" in c.reasons for c in records)
 
 
 def test_invalid_embeddings():

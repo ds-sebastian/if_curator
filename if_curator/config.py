@@ -38,7 +38,16 @@ class Config:
     ENABLE_FACE_ALIGNMENT: bool = False
 
     FACE_MAX_IMAGES: int = 30
-    FACE_DUPLICATE_DISTANCE: float = 0.05
+    FACE_BURST_SECONDS: float = 2.0
+    FACE_PIXEL_DUPLICATE_DISTANCE: float = 0.02
+    FACE_IDENTITY_MARGIN: float = 0.1
+    FACE_OPTIMIZATION_EPSILON: float = 0.00001
+    FRIGATE_VERSION: str = "0.17.2"
+    FRIGATE_MODEL_DIR: str = ".if_cache/frigate"
+    FRIGATE_UNKNOWN_SCORE: float = 0.8
+    FRIGATE_RECOGNITION_THRESHOLD: float = 0.9
+    FRIGATE_BLUR_CONFIDENCE_FILTER: bool = True
+    CAMERA_MANIFEST: str = ""
     FACE_OUTLIER_MAD: float = 3.0
     REJECT_GRAYSCALE: bool = True
     FORCE_CPU: bool = False
@@ -101,7 +110,16 @@ class Config:
             "ENABLE_CACHE",
             "CACHE_DIR",
             "FORCE_CPU",
-            "FACE_DUPLICATE_DISTANCE",
+            "FACE_BURST_SECONDS",
+            "FACE_PIXEL_DUPLICATE_DISTANCE",
+            "FACE_OPTIMIZATION_EPSILON",
+            "FACE_IDENTITY_MARGIN",
+            "FRIGATE_VERSION",
+            "FRIGATE_MODEL_DIR",
+            "FRIGATE_UNKNOWN_SCORE",
+            "FRIGATE_RECOGNITION_THRESHOLD",
+            "FRIGATE_BLUR_CONFIDENCE_FILTER",
+            "CAMERA_MANIFEST",
             "FACE_OUTLIER_MAD",
             "REJECT_GRAYSCALE",
         )
@@ -113,13 +131,24 @@ class Config:
         for name, lo, hi in (
             ("MIN_CONFIDENCE", 0, 1),
             ("FACE_MARGIN", 0, 1),
-            ("FACE_DUPLICATE_DISTANCE", 0, 2),
+            ("FACE_BURST_SECONDS", 0, float("inf")),
+            ("FACE_PIXEL_DUPLICATE_DISTANCE", 0, 1),
+            ("FACE_OPTIMIZATION_EPSILON", 0, 1),
+            ("FACE_IDENTITY_MARGIN", 0, 2),
+            ("FRIGATE_UNKNOWN_SCORE", 0, 1),
+            ("FRIGATE_RECOGNITION_THRESHOLD", 0, 1),
             ("FACE_OUTLIER_MAD", 0, float("inf")),
             ("BLUR_THRESHOLD", 0, float("inf")),
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"Invalid {name}: outside allowed range")
+        if self.FRIGATE_VERSION != "0.17.2":
+            raise ValueError("Only the verified Frigate 0.17.2 large profile is supported")
+        if not self.FRIGATE_MODEL_DIR:
+            raise ValueError("FRIGATE_MODEL_DIR must not be empty")
+        if self.FRIGATE_UNKNOWN_SCORE > self.FRIGATE_RECOGNITION_THRESHOLD:
+            raise ValueError("FRIGATE_UNKNOWN_SCORE must not exceed FRIGATE_RECOGNITION_THRESHOLD")
         if not self.CACHE_DIR:
             raise ValueError("CACHE_DIR must not be empty")
 
