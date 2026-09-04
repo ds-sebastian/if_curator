@@ -82,6 +82,6 @@ _cache: EmbeddingCache | None = None
 def get_cache(cache_dir: str = ".if_cache") -> EmbeddingCache:
     """Get or create the singleton cache instance."""
     global _cache
-    if _cache is None:
+    if _cache is None or _cache.cache_dir != cache_dir:
         _cache = EmbeddingCache(cache_dir)
     return _cache

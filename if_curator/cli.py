@@ -1,11 +1,8 @@
 """Interactive CLI for if-curator."""
 
+import hashlib
 import logging
-import os
-from io import BytesIO
 
-import requests
-from PIL import Image
 from rich import print as rprint
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -14,9 +11,11 @@ from rich.table import Table
 from .config import Config, ConfigManager
 from .diversity import select_diverse_assets
 from .embeddings import is_embedding_available
-from .image_processing import process_face_mode, process_full_mode, process_object_mode
+from .faces import FacePipelineError, prepare_face_candidates, select_face_candidates
+from .image_processing import process_full_mode, process_object_mode
 from .immich_api import fetch_all_assets, fetch_full_image, filter_recent_assets, get_people
 from .logging import console, setup_logging
+from .runs import RunWorkspace, person_directory
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +29,24 @@ STRATEGY_PRESETS = {
 
 def _get_strategy_choice(has_embedding: bool, entity_type: str) -> tuple[int | str, str]:
     """Prompt user for training strategy and return (limit, selection_mode)."""
+    if entity_type == "face":
+        if not has_embedding:
+            raise FacePipelineError("InsightFace unavailable; cannot validate face candidates")
+        rprint(f"  1. Diverse (up to {Config.FACE_MAX_IMAGES}) [Recommended]")
+        rprint("  2. Starter (up to 5)")
+        rprint("  3. Custom count")
+        rprint("  4. Skip")
+        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1")
+        if choice == "4":
+            return 0, "skip"
+        if choice == "3":
+            limit = 0
+            while limit <= 0:
+                limit = IntPrompt.ask("Maximum images (positive integer)", default=30)
+            mode = "smart" if Confirm.ask("Use representative diversity?", default=True) else "time"
+            return limit, mode
+        return (Config.FACE_MAX_IMAGES if choice == "1" else 5), "smart"
+
     model_name = "InsightFace" if entity_type == "face" else "SigLIP"
 
     if has_embedding:
@@ -60,11 +77,13 @@ def _get_strategy_choice(has_embedding: bool, entity_type: str) -> tuple[int | s
     rprint("  [bold]4.[/bold] Skip")
 
     choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1")
-    limits = {"1": 30, "2": 100, "3": IntPrompt.ask("Enter number of images", default=30)}
+    limits = {"1": 30, "2": 100}
+    if choice == "3":
+        limits["3"] = IntPrompt.ask("Enter number of images", default=30)
     return limits.get(choice, 0), "time" if choice != "4" else "skip"
 
 
-def _configure_person(person: dict, people: list[dict]) -> dict | None:
+def _configure_person(person: dict, workspace: RunWorkspace) -> dict | None:
     """Configure training for a single person. Returns job dict or None."""
     name = person["name"]
     console.print(f"\nSelected: [bold green]{name}[/bold green]")
@@ -103,14 +122,45 @@ def _configure_person(person: dict, people: list[dict]) -> dict | None:
     if selection_mode == "skip":
         return None
 
-    # Perform selection
+    if entity_type == "face":
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), console=console
+        ) as progress:
+            task = progress.add_task("Preparing and evaluating target faces...", total=None)
+            candidates, fingerprint = prepare_face_candidates(
+                recent_assets,
+                person["id"],
+                workspace.preparation_directory(person["id"]),
+                lambda c, t: progress.update(task, completed=c, total=t),
+            )
+            selected = select_face_candidates(candidates, limit, selection_mode)
+        selected_ids = {c.asset_id for c in selected}
+        selected_assets = [a for a in recent_assets if a["id"] in selected_ids]
+        return {
+            "person": person,
+            "assets": selected_assets,
+            "limit": len(selected),
+            "config": config,
+            "candidates": candidates,
+            "selected_faces": selected,
+            "model_fingerprint": fingerprint,
+            "selection_mode": selection_mode,
+            "requested_limit": limit,
+            "years_filter": years,
+        }
     selected_assets = _perform_selection(recent_assets, limit, name, selection_mode, entity_type)
+    return {
+        "person": person,
+        "assets": selected_assets,
+        "limit": len(selected_assets),
+        "config": config,
+        "selection_mode": selection_mode,
+        "requested_limit": limit,
+        "years_filter": years,
+    }
 
-    rprint(f"  [green]Queued {len(selected_assets)} images for {name}.[/green]")
-    return {"person": person, "assets": selected_assets, "limit": len(selected_assets), "config": config}
 
-
-def interactive_configure(people: list[dict]) -> list[dict]:
+def interactive_configure(people: list[dict], workspace: RunWorkspace) -> list[dict]:
     """Interactive phase: select person(s), mode, and configure training strategy.
 
     Supports multi-person batch mode — after configuring one person,
@@ -135,9 +185,13 @@ def interactive_configure(people: list[dict]) -> list[dict]:
         p_choice = IntPrompt.ask("Enter Number", choices=[str(i) for i in range(1, len(valid_people) + 1)])
         person = valid_people[p_choice - 1]
 
-        job = _configure_person(person, valid_people)
+        if any(j["person"]["id"] == person["id"] for j in jobs):
+            rprint("[yellow]This person is already queued.[/yellow]")
+            continue
+        job = _configure_person(person, workspace)
         if job:
             jobs.append(job)
+            workspace.record_jobs(jobs)
 
         # Multi-person: ask to add another
         if not Confirm.ask("\nAdd another person?", default=False):
@@ -188,7 +242,9 @@ def _show_preview(jobs: list[dict]) -> None:
     table = Table(title="📋 Training Job Preview", show_header=True, header_style="bold cyan")
     table.add_column("Person", style="bold")
     table.add_column("Mode", style="dim")
-    table.add_column("Images", justify="right")
+    table.add_column("Selected", justify="right")
+    table.add_column("Prepared", justify="right")
+    table.add_column("Rejected / not selected", justify="right")
     table.add_column("Date Range", style="dim")
 
     for job in jobs:
@@ -200,77 +256,76 @@ def _show_preview(jobs: list[dict]) -> None:
         dates = sorted(a.get("fileCreatedAt", "")[:10] for a in job["assets"] if a.get("fileCreatedAt"))
         date_range = f"{dates[0]} → {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "—")
 
-        table.add_row(name, mode, count, date_range)
+        candidates = job.get("candidates", [])
+        prepared = sum(c.prepared_path is not None for c in candidates)
+        rejected = sum(bool(c.reasons) for c in candidates)
+        table.add_row(
+            name,
+            mode,
+            count,
+            str(prepared) if mode == "face" else "—",
+            str(rejected) if mode == "face" else "—",
+            date_range,
+        )
 
     console.print()
     console.print(table)
     console.print()
 
 
-def execute_jobs(jobs: list[dict]) -> None:
-    """Download and process images for all jobs."""
+def execute_jobs(jobs: list[dict], workspace: RunWorkspace | None = None):
+    """Publish an isolated run; faces are copied byte-for-byte from evaluation."""
     if not jobs:
-        return
-
-    console.rule("[bold blue]Execution Phase")
-
-    use_full_res = Config.USE_FULL_RESOLUTION
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        grand_total = sum(j["limit"] for j in jobs)
-        overall_task = progress.add_task("[green]Overall Progress", total=grand_total)
-
+        return None
+    workspace = workspace or RunWorkspace(Config.OUTPUT_DIR)
+    try:
         for job in jobs:
-            person, assets, config = job["person"], job["assets"], job["config"]
-            name, mode = person["name"], config.get("mode", "face")
+            mode = job["config"].get("mode", "face")
+            if mode == "face":
+                workspace.export_faces(job)
+            else:
+                person = job["person"]
+                directory = workspace.path / person_directory(person["name"], person["id"], mode)
+                directory.mkdir(exist_ok=False)
+                job["object_outputs"] = []
+                for count, asset in enumerate(job["assets"]):
+                    from .immich_api import fetch_image_source
 
-            job_task = progress.add_task(f"Processing {name}...", total=len(assets))
-            person_dir = os.path.join(Config.OUTPUT_DIR, name)
-            os.makedirs(person_dir, exist_ok=True)
-
-            count = 0
-            for asset in assets:
-                try:
-                    # Use full-resolution for final output when configured
-                    if use_full_res:
-                        img = fetch_full_image(asset["id"])
-                    else:
-                        resp = requests.get(
-                            f"{Config.IMMICH_URL}/api/assets/{asset['id']}/thumbnail?size=preview&format=JPEG",
-                            headers={"x-api-key": Config.API_KEY, "Accept": "application/json"},
-                            timeout=30,
-                        )
-                        img = Image.open(BytesIO(resp.content)) if resp.ok else None
-
-                    if img is None:
-                        progress.console.print(f"[red]Failed download {asset['id']}[/red]")
-                    else:
-                        saved = (
-                            process_face_mode(img, asset, person, person_dir, count)
-                            if mode == "face"
-                            else process_object_mode(img, config, person_dir, count)
-                            if mode == "object"
-                            else process_full_mode(img, person_dir, count)
-                        )
-                        if saved:
-                            count += 1
-                except Exception as e:
-                    logger.error(f"Failed to process asset {asset['id']}: {e}")
-
-                progress.advance(job_task)
-                progress.advance(overall_task)
-
-            progress.remove_task(job_task)
+                    image = (
+                        fetch_full_image(asset["id"])
+                        if Config.USE_FULL_RESOLUTION
+                        else (fetch_image_source(asset["id"], False)[0])
+                    )
+                    if image is None:
+                        raise ValueError(f"Could not download asset {asset['id']}")
+                    try:
+                        if mode == "object":
+                            process_object_mode(image, job["config"], str(directory), count)
+                        else:
+                            process_full_mode(image, str(directory), count)
+                    finally:
+                        image.close()
+                    for output in sorted(directory.glob(f"{count}*.jpg")):
+                        # Include only this asset's numeric prefix.
+                        if output.stem.split("_")[0] == str(count):
+                            job["object_outputs"].append(
+                                {
+                                    "asset_id": asset["id"],
+                                    "output_path": str(output.relative_to(workspace.path)),
+                                    "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                                }
+                            )
+            workspace.record_jobs(jobs)
+        return workspace.publish(jobs)
+    except BaseException:
+        workspace.record_jobs(jobs)
+        workspace.fail()
+        raise
 
 
 def main() -> None:
     """Entry point for if-curator CLI."""
+    workspace = None
     try:
         setup_logging(verbose=False)
 
@@ -295,18 +350,29 @@ def main() -> None:
             rprint("[bold red]Could not fetch people from Immich. Check URL/Key.[/bold red]")
             return
 
-        jobs = interactive_configure(people)
+        workspace = RunWorkspace(Config.OUTPUT_DIR)
+        jobs = interactive_configure(people, workspace)
 
         if jobs:
             _show_preview(jobs)
-            if Confirm.ask(f"Ready to process {sum(j['limit'] for j in jobs)} images?"):
-                execute_jobs(jobs)
-                rprint("\n[bold green]Done! Happy Training.[/bold green]")
+            if Confirm.ask(f"Export {sum(j['limit'] for j in jobs)} selected images?"):
+                destination = execute_jobs(jobs, workspace)
+                console.print(f"Export complete: {destination}")
+            else:
+                workspace.fail("cancelled")
         else:
             rprint("[yellow]No jobs configured.[/yellow]")
+            workspace.fail("cancelled")
 
     except KeyboardInterrupt:
+        if workspace:
+            workspace.fail("interrupted")
         rprint("\n[bold red]Aborted by user.[/bold red]")
+    except Exception:
+        if workspace:
+            workspace.fail()
+            console.print(f"Run failed; incomplete artifacts: {workspace.path}")
+        raise
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """
 Unified embedding interface for faces and objects.
 
-- Faces: InsightFace (ArcFace/Buffalo_L) — or reuse from Immich
+- Faces: local InsightFace app, consumed by the target-bound face pipeline
 - Objects: SigLIP (Vision Transformer via transformers)
 - Caching: Disk-based cache avoids recomputation on reruns
 """
@@ -9,9 +9,7 @@ Unified embedding interface for faces and objects.
 import contextlib
 import logging
 import os
-import warnings
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -41,12 +39,15 @@ def get_insightface_app():
     if _insightface_app is not None:
         return _insightface_app
 
+    ctx_id = -1
     try:
         import onnxruntime as ort
         from insightface.app import FaceAnalysis
 
         # Get providers, excluding TensorRT to avoid noisy errors
         providers = [p for p in ort.get_available_providers() if p != "TensorrtExecutionProvider"]
+        if _is_force_cpu():
+            providers = ["CPUExecutionProvider"]
         logger.info(f"Available ONNX providers: {providers}")
 
         # Determine device: 0 for GPU, -1 for CPU
@@ -63,13 +64,14 @@ def get_insightface_app():
 
         # Suppress C-level output during model loading
         with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            _insightface_app = FaceAnalysis(name="buffalo_l", root="~/.insightface", providers=providers)
-            _insightface_app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+            app = FaceAnalysis(name="buffalo_l", root="~/.insightface", providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+            _insightface_app = app
 
         return _insightface_app
 
-    except ImportError:
-        logger.error("InsightFace not installed!")
+    except ImportError as exc:
+        logger.error(f"InsightFace dependency unavailable: {exc}")
         return None
     except Exception as e:
         logger.error(f"Failed to load InsightFace: {e}")
@@ -79,37 +81,12 @@ def get_insightface_app():
             try:
                 from insightface.app import FaceAnalysis
 
-                _insightface_app = FaceAnalysis(name="buffalo_l", root="~/.insightface")
-                _insightface_app.prepare(ctx_id=-1, det_size=(640, 640))
-                return _insightface_app
+                app = FaceAnalysis(name="buffalo_l", root="~/.insightface", providers=["CPUExecutionProvider"])
+                app.prepare(ctx_id=-1, det_size=(640, 640))
+                _insightface_app = app
+                return app
             except Exception as ex:
                 logger.error(f"CPU fallback failed: {ex}")
-        return None
-
-
-def get_face_embedding(img_pil: Image.Image) -> np.ndarray | None:
-    """Get embedding of the largest face in a PIL image."""
-    app = get_insightface_app()
-    if not app:
-        return None
-
-    try:
-        # InsightFace expects BGR cv2 image
-        img_bgr = cv2.cvtColor(np.asarray(img_pil), cv2.COLOR_RGB2BGR)
-
-        # Suppress scikit-image FutureWarning from InsightFace's face_align.py
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=".*estimate.*is deprecated", category=FutureWarning)
-            faces = app.get(img_bgr)
-
-        if not faces:
-            return None
-
-        # Return embedding of largest face
-        largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        return largest.embedding
-    except Exception as e:
-        logger.error(f"Error getting face embedding: {e}")
         return None
 
 
@@ -213,55 +190,21 @@ def get_object_embeddings_batch(images: list[Image.Image]) -> list[np.ndarray | 
 # =============================================================================
 
 
-def get_embedding(
-    img_pil: Image.Image,
-    entity_type: str = "face",
-    asset_id: str | None = None,
-    immich_embedding: np.ndarray | None = None,
-) -> np.ndarray | None:
-    """Get embedding for an image based on entity type.
-
-    Priority:
-    1. Pre-fetched Immich embedding (if provided)
-    2. Disk cache (if enabled and asset_id provided)
-    3. Local model computation (InsightFace or SigLIP)
-
-    Args:
-        img_pil: The image to embed
-        entity_type: 'face' or 'object'
-        asset_id: Optional asset ID for cache lookup
-        immich_embedding: Optional pre-fetched embedding from Immich API
-    """
+def get_embedding(img_pil: Image.Image, entity_type: str = "object", asset_id: str | None = None) -> np.ndarray | None:
+    """Object embedding cache. Face embeddings use the target-bound face pipeline."""
     from .config import Config
 
-    use_cache = Config.ENABLE_CACHE and asset_id is not None
-    cache = get_cache(Config.CACHE_DIR) if use_cache else None
-    model_key = "immich" if entity_type == "face" else "siglip"
-
-    # 1. Use Immich embedding if provided
-    if immich_embedding is not None:
-        if cache:
-            cache.put(asset_id, immich_embedding, model_key)
-        return immich_embedding
-
-    # 2. Check disk cache
+    if entity_type != "object":
+        raise ValueError("Face embeddings require a prepared, target-bound candidate")
+    cache = get_cache(Config.CACHE_DIR) if Config.ENABLE_CACHE and asset_id is not None else None
     if cache:
-        cached = cache.get(asset_id, model_key)
+        cached = cache.get(asset_id, "siglip")
         if cached is not None:
             return cached
-
-    # 3. Compute locally
-    if entity_type == "face":
-        emb = get_face_embedding(img_pil)
-        model_key = "insightface"
-    else:
-        emb = get_object_embedding(img_pil)
-
-    # Cache the result
-    if emb is not None and cache:
-        cache.put(asset_id, emb, model_key)
-
-    return emb
+    embedding = get_object_embedding(img_pil)
+    if embedding is not None and cache:
+        cache.put(asset_id, embedding, "siglip")
+    return embedding
 
 
 def is_embedding_available(entity_type: str = "face") -> bool:

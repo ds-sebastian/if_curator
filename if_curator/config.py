@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import ClassVar
@@ -34,7 +35,13 @@ class Config:
     # Output quality
     FACE_MARGIN: float = 0.15
     USE_FULL_RESOLUTION: bool = True
-    ENABLE_FACE_ALIGNMENT: bool = True
+    ENABLE_FACE_ALIGNMENT: bool = False
+
+    FACE_MAX_IMAGES: int = 30
+    FACE_DUPLICATE_DISTANCE: float = 0.05
+    FACE_OUTLIER_MAD: float = 3.0
+    REJECT_GRAYSCALE: bool = True
+    FORCE_CPU: bool = False
 
     # Caching (opt-in to avoid unexpected files)
     ENABLE_CACHE: bool = False
@@ -52,8 +59,21 @@ class Config:
         self.IMMICH_URL = os.getenv("IMMICH_URL")
         self.API_KEY = os.getenv("API_KEY")
         self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./frigate_train")
-        self.YEARS_FILTER = int(os.getenv("YEARS_FILTER", "10"))
-        self.MIN_FACE_WIDTH = int(os.getenv("MIN_FACE_WIDTH", "50"))
+        for name in self.setting_names():
+            default = getattr(type(self), name)
+            raw = os.getenv(name)
+            if raw is None:
+                setattr(self, name, default)
+            elif isinstance(default, bool):
+                if raw.lower() not in {"true", "false", "1", "0", "yes", "no"}:
+                    raise ValueError(f"{name} must be a boolean")
+                setattr(self, name, raw.lower() in {"true", "1", "yes"})
+            else:
+                try:
+                    setattr(self, name, type(default)(raw))
+                except ValueError as exc:
+                    raise ValueError(f"Invalid {name}") from exc
+        self.validate_settings()
 
         # Fall back to config file for missing values
         if CONFIG_FILE.exists():
@@ -65,6 +85,47 @@ class Config:
                     self.OUTPUT_DIR = data.get("OUTPUT_DIR", self.OUTPUT_DIR)
             except (json.JSONDecodeError, OSError) as e:
                 logging.warning(f"Failed to load config file: {e}")
+
+    @staticmethod
+    def setting_names() -> tuple[str, ...]:
+        return (
+            "YEARS_FILTER",
+            "MIN_FACE_WIDTH",
+            "BLUR_THRESHOLD",
+            "MIN_CONFIDENCE",
+            "MAX_AUTO_IMAGES",
+            "FACE_MAX_IMAGES",
+            "FACE_MARGIN",
+            "USE_FULL_RESOLUTION",
+            "ENABLE_FACE_ALIGNMENT",
+            "ENABLE_CACHE",
+            "CACHE_DIR",
+            "FORCE_CPU",
+            "FACE_DUPLICATE_DISTANCE",
+            "FACE_OUTLIER_MAD",
+            "REJECT_GRAYSCALE",
+        )
+
+    def validate_settings(self) -> None:
+        for name in ("YEARS_FILTER", "MIN_FACE_WIDTH", "MAX_AUTO_IMAGES", "FACE_MAX_IMAGES"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        for name, lo, hi in (
+            ("MIN_CONFIDENCE", 0, 1),
+            ("FACE_MARGIN", 0, 1),
+            ("FACE_DUPLICATE_DISTANCE", 0, 2),
+            ("FACE_OUTLIER_MAD", 0, float("inf")),
+            ("BLUR_THRESHOLD", 0, float("inf")),
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not lo <= value <= hi:
+                raise ValueError(f"Invalid {name}: outside allowed range")
+        if not self.CACHE_DIR:
+            raise ValueError("CACHE_DIR must not be empty")
+
+    def snapshot(self) -> dict:
+        """Public processing settings only; never include credentials."""
+        return {name: getattr(self, name) for name in self.setting_names()}
 
     def save(self) -> None:
         """Persist configuration to file."""
@@ -101,6 +162,7 @@ class Config:
 
     def validate(self) -> None:
         """Raise ValueError if required config is missing."""
+        self.validate_settings()
         if not self.IMMICH_URL or not self.API_KEY:
             raise ValueError("Missing Immich URL or API Key.")
 

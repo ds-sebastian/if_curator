@@ -1,28 +1,15 @@
 """Immich API client for fetching people, assets, and face data."""
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
-import numpy as np
 import requests
 from PIL import Image
 
 from .config import Config, get_headers
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FaceData:
-    """Pre-computed face data from Immich."""
-
-    embedding: np.ndarray | None
-    bbox: tuple[float, float, float, float]  # (x1, y1, x2, y2)
-    confidence: float | None
-    image_width: int
-    image_height: int
 
 
 def get_people() -> list[dict]:
@@ -81,71 +68,6 @@ def fetch_all_assets(person: dict) -> list[dict]:
             break
 
     return assets
-
-
-def fetch_face_data(asset_id: str, person_id: str | None = None) -> FaceData | None:
-    """Fetch pre-computed face data (embedding, bbox, confidence) from Immich.
-
-    Queries GET /api/faces?id={asset_id} to retrieve face detection results
-    that Immich already computed using InsightFace Buffalo_L.
-
-    Args:
-        asset_id: The asset to get face data for
-        person_id: Optional person ID to match the specific face
-
-    Returns:
-        FaceData with embedding, bbox, and confidence, or None if unavailable
-    """
-    try:
-        resp = requests.get(
-            f"{Config.IMMICH_URL}/api/faces",
-            params={"id": asset_id},
-            headers=get_headers(),
-            timeout=10,
-        )
-
-        if not resp.ok:
-            logger.debug(f"Face data endpoint returned {resp.status_code} for {asset_id}")
-            return None
-
-        faces = resp.json()
-        if not faces:
-            return None
-
-        # Match the target person if specified
-        face = None
-        if person_id:
-            face = next((f for f in faces if f.get("person", {}).get("id") == person_id), None)
-        if face is None:
-            face = faces[0]  # Fall back to first/largest face
-
-        # Extract embedding if available
-        embedding = None
-        if "embedding" in face:
-            embedding = np.array(face["embedding"], dtype=np.float32)
-
-        # Extract bounding box
-        bbox = (
-            face.get("boundingBoxX1", 0),
-            face.get("boundingBoxY1", 0),
-            face.get("boundingBoxX2", 0),
-            face.get("boundingBoxY2", 0),
-        )
-
-        return FaceData(
-            embedding=embedding,
-            bbox=bbox,
-            confidence=face.get("score") or face.get("confidence"),
-            image_width=face.get("imageWidth", 0),
-            image_height=face.get("imageHeight", 0),
-        )
-
-    except requests.RequestException as e:
-        logger.debug(f"Failed to fetch face data for {asset_id}: {e}")
-        return None
-    except (KeyError, TypeError, ValueError) as e:
-        logger.debug(f"Failed to parse face data for {asset_id}: {e}")
-        return None
 
 
 def fetch_full_image(asset_id: str, timeout: int = 60) -> Image.Image | None:
@@ -209,3 +131,45 @@ def filter_recent_assets(assets: list[dict], years: int | None = None) -> list[d
 
     logger.info(f"Retained {len(recent)} assets (filtered {skipped} old assets).")
     return recent
+
+
+def resolve_face_metadata(asset: dict, person_id: str) -> dict:
+    """Return exactly one target face. Missing nested metadata triggers API lookup."""
+    if not person_id:
+        raise ValueError("person_id is required")
+    fields = {"imageWidth", "imageHeight", "boundingBoxX1", "boundingBoxX2", "boundingBoxY1", "boundingBoxY2"}
+    matches = [
+        face for person in asset.get("people", []) if person.get("id") == person_id for face in person.get("faces", [])
+    ]
+    if len(matches) > 1:
+        raise ValueError("ambiguous_target_face")
+    if len(matches) == 1 and fields <= matches[0].keys():
+        return matches[0]
+    resp = requests.get(f"{Config.IMMICH_URL}/api/faces", params={"id": asset["id"]}, headers=get_headers(), timeout=10)
+    resp.raise_for_status()
+    matches = [face for face in resp.json() if (face.get("person") or {}).get("id") == person_id]
+    if len(matches) != 1:
+        raise ValueError("missing_or_ambiguous_target_face")
+    if not fields <= matches[0].keys():
+        raise ValueError("incomplete_face_metadata")
+    return matches[0]
+
+
+def fetch_image_source(asset_id: str, use_original: bool = True) -> tuple[Image.Image, str]:
+    """Fully decode and orient an image before declaring a download successful."""
+    from PIL import ImageOps
+
+    endpoints = []
+    if use_original:
+        endpoints.append((f"/api/assets/{asset_id}/original", "original"))
+    endpoints.append((f"/api/assets/{asset_id}/thumbnail?size=preview&format=JPEG", "preview"))
+    for endpoint, source in endpoints:
+        try:
+            resp = requests.get(f"{Config.IMMICH_URL}{endpoint}", headers=get_headers(), timeout=60)
+            resp.raise_for_status()
+            with Image.open(BytesIO(resp.content)) as image:
+                image.load()
+                return ImageOps.exif_transpose(image).convert("RGB"), source
+        except (requests.RequestException, OSError, ValueError):
+            continue
+    raise ValueError("image_download_or_decode_failed")
