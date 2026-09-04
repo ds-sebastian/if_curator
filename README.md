@@ -90,6 +90,7 @@ uv run if-curator
 
 ```bash
 uv sync --extra gpu
+uv run --extra gpu if-curator
 ```
 
 ONNX Runtime selects available execution providers; CPU fallback is supported.
