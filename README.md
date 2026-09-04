@@ -57,7 +57,7 @@ All inference runs locally; photos are not uploaded to model providers.
 1. **Choose a person** from Immich, select face mode, and set a date range.
 2. **Choose a ceiling** using one of the presets below.
 3. **Queue other people** to include them in cross-person comparisons.
-4. **Review the selection** and export. The preview shows selected, prepared, and rejected counts.
+4. **Review the selection** and export. The preview separates scanned, quality-approved, eligible, and selected counts.
 
 | Preset | Maximum | Selection |
 | :--- | ---: | :--- |

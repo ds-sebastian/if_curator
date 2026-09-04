@@ -22,7 +22,9 @@ from .frigate import blur_reduction, get_frigate_model
 from .immich_api import fetch_image_source, resolve_face_metadata
 from .quality import assess_quality
 
-PREPROCESSING_VERSION = "target-face-frigate-jpeg-v2"
+PREPROCESSING_VERSION = "target-face-frigate-jpeg-v3"
+# Tight enrollment crops need a smaller detection scale than full photographs.
+DETECTOR_INPUT_SIZE = (320, 320)
 
 
 class FacePipelineError(RuntimeError):
@@ -99,7 +101,7 @@ def detect_target(app, image: Image.Image, expected_bbox):
     """Detect without embedding arbitrary neighboring faces."""
     bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
     try:
-        boxes, landmarks = app.det_model.detect(bgr, max_num=0)
+        boxes, landmarks = app.det_model.detect(bgr, input_size=DETECTOR_INPUT_SIZE, max_num=0)
     except Exception as exc:
         raise FacePipelineError("Local face detector failed") from exc
     matches = [i for i, box in enumerate(boxes) if intersection_over_union(box[:4], expected_bbox) >= 0.5]

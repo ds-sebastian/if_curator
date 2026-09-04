@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .config import Config
-from .faces import PREPROCESSING_VERSION
+from .faces import DETECTOR_INPUT_SIZE, PREPROCESSING_VERSION
 
 
 def person_directory(name: str, person_id: str, mode: str = "face") -> str:
@@ -32,6 +32,7 @@ class RunWorkspace:
             "status": "preparing",
             "configuration": Config.snapshot(),
             "preprocessing_version": PREPROCESSING_VERSION,
+            "face_detector_input_size": DETECTOR_INPUT_SIZE,
             "embedding_backend": "Frigate 0.17.2 large ArcFace; InsightFace target detection",
             "jobs": [],
         }

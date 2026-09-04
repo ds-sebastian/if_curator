@@ -246,3 +246,40 @@ def test_embedding_receives_decoded_export_pixels(tmp_path, image, metadata, can
     with Image.open(candidate.prepared_path) as final:
         expected = cv2.cvtColor(np.asarray(final.convert("RGB")), cv2.COLOR_RGB2BGR)
     np.testing.assert_array_equal(embedding_call.call_args.args[0], expected)
+
+
+def test_tight_crop_uses_single_face_detection_scale_without_resizing_export(image):
+    expected = (60, 40, 200, 200)
+    calls = []
+
+    def detect(bgr, *, input_size, max_num):
+        calls.append((bgr.shape, input_size, max_num))
+        # Reproduce SCRFD's large-face failure at the full-photograph input size.
+        if input_size == (640, 640):
+            return np.empty((0, 5)), np.empty((0, 5, 2))
+        return np.array([[*expected, 0.89]]), np.ones((1, 5, 2), dtype=np.float32)
+
+    app = SimpleNamespace(det_model=SimpleNamespace(detect=detect))
+    bgr, target = faces.detect_target(app, image, expected)
+    assert calls == [((image.height, image.width, 3), (320, 320), 0)]
+    assert bgr.shape[:2] == (image.height, image.width)
+    assert target.det_score == 0.89
+    np.testing.assert_array_equal(target.bbox, expected)
+
+
+def test_single_face_scale_does_not_relax_confidence_gate(image):
+    app = SimpleNamespace(
+        det_model=SimpleNamespace(
+            detect=lambda *a, **kw: (np.array([[60, 40, 200, 200, 0.6]]), np.ones((1, 5, 2), dtype=np.float32))
+        )
+    )
+    _, target = faces.detect_target(app, image, (60, 40, 200, 200))
+    quality = assess_quality(
+        image.crop((60, 40, 200, 200)),
+        confidence=target.det_score,
+        min_confidence=0.7,
+        blur_threshold=0,
+        reject_grayscale=False,
+    )
+    assert not quality.passed
+    assert any(reason.startswith("Low confidence") for reason in quality.reasons)
