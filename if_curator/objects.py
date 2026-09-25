@@ -69,7 +69,7 @@ def analyze_objects(immich: Immich, model: ObjectModel, job: Job, settings, prog
         for box in boxes:
             crop = Candidate(photo.asset_id, photo.taken, photo.checksum, box=box, frame=image.shape[1::-1])
             job.candidates.append(crop)
-            pending.append((crop, image[int(box[1]) : int(box[3]), int(box[0]) : int(box[2])]))
+            pending.append((crop, image[int(box[1]) : int(box[3]), int(box[0]) : int(box[2])].copy()))
         if len(pending) >= 32:
             embed_pending()
         progress(completed=done, total=len(photos))

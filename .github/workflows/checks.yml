@@ -21,5 +21,3 @@ jobs:
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked pytest -q
-        env:
-          FORCE_CPU: 'true'

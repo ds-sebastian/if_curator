@@ -43,7 +43,8 @@ def crop_region(image: np.ndarray, box, margin: float):
 
 def fetch_region(immich: Immich, candidate: Candidate, margin: float, original: bool = False):
     image = immich.image(candidate.asset_id, original)
-    return crop_region(image, scale_box(candidate.box, candidate.frame, image.shape[1::-1]), margin)
+    region, target = crop_region(image, scale_box(candidate.box, candidate.frame, image.shape[1::-1]), margin)
+    return region.copy(), target  # Don't keep the whole photo alive through a view.
 
 
 def measure(face: np.ndarray) -> dict:
