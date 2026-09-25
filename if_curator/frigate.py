@@ -7,7 +7,6 @@ similarity to each person's 15% trimmed mean of raw library embeddings.
 
 import ctypes.util
 import hashlib
-import logging
 import math
 import os
 import sys
@@ -18,8 +17,6 @@ import cv2
 import numpy as np
 import requests
 from PIL import Image
-
-log = logging.getLogger(__name__)
 
 MODEL_URL = "https://github.com/NickM-27/facenet-onnx/releases/download/v1.0/"
 MODEL_HASHES = {

@@ -42,7 +42,7 @@ def _parse(name: str, default, raw: str):
         return type(default)(raw)
     except ValueError:
         raise ValueError(
-            f"{name} must be a{'n' if isinstance(default, int) else ''} {type(default).__name__}"
+            f"{name} must be a {'whole ' if isinstance(default, int) else ''}number, not {raw!r}"
         ) from None
 
 

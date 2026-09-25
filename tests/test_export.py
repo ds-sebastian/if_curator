@@ -44,6 +44,14 @@ def test_exports_frigate_face_crops_with_manifest(tmp_path):
     assert rex["images"][0]["file"] == "Rex/000.jpg" and (run / "Rex" / "000.jpg").exists()
 
 
+def test_people_with_nothing_exported_get_no_folder(tmp_path, caplog):
+    assets = [photo(1)]
+    job = selected_job("Ann", "p1", assets)
+    run = export([job], FakeImmich(assets, broken={("asset-001", True), ("asset-001", False)}), FakeFaces(), Settings())
+    assert not (run / "Ann").exists() and "Skipped photo asset-001" in caplog.text
+    assert json.loads((run / "manifest.json").read_text())["people"][0]["folder"] is None
+
+
 def test_failed_export_leaves_nothing(tmp_path):
     class Broken(FakeFaces):
         def detect(self, image, target):

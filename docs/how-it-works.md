@@ -77,7 +77,8 @@ For each person:
 7. **Export.** Download the original (falling back to the preview), re-run YuNet on it,
    and save the tight crop as WebP at quality 100, exactly as Frigate's own upload does.
 
-Libraries over 1,000 usable faces are sampled evenly through time.
+Large libraries are sampled evenly through time: face boxes are looked up for at most
+3,000 photos, and at most 1,000 usable faces are analyzed.
 
 ## Reading the summary
 

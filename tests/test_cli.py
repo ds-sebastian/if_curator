@@ -48,3 +48,27 @@ def test_unknown_name_fails_cleanly(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exit:
         cli.main(["Zed"])
     assert exit.value.code == 1 and "No one in Immich is called" in capsys.readouterr().out
+
+
+def test_connection_is_saved_only_after_it_works(monkeypatch):
+    from if_curator import config
+
+    answers = iter(["immich.local:2283", "key"])
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: next(answers))
+    immich = FakeImmich([])
+    immich.people = lambda: PEOPLE
+    seen = []
+    monkeypatch.setattr(cli, "Immich", lambda url, key: seen.append((url, key)) or immich)
+    cli.connect(config.load_settings({}))
+    assert seen == [("http://immich.local:2283", "key")]
+    assert config.load_settings({}).IMMICH_URL == "http://immich.local:2283"
+
+    def unreachable():
+        raise cli.requests.ConnectionError("refused")
+
+    config.CONNECTION_FILE.unlink()
+    answers = iter(["bad-host", "key"])
+    immich.people = unreachable
+    with pytest.raises(cli.requests.ConnectionError):
+        cli.connect(config.load_settings({}))
+    assert not config.CONNECTION_FILE.exists()

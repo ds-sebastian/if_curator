@@ -11,9 +11,17 @@ from .immich import BOX_KEYS, DOWNLOAD_ERRORS, Immich, bounded_map
 from .selection import Candidate, Job
 
 PIPELINE = "frigate-0.17-yunet-v1"  # Change to invalidate cached analyses.
-MAX_CANDIDATES = 1000
+MAX_CANDIDATES = 1000  # Faces analyzed per person; also caps face lookups at 3x this many photos.
 CONTEXT = 0.5  # Detect within this margin around Immich's box, as Frigate does in an uploaded photo.
 BATCH = 8
+
+
+def spread(items: list, limit: int, key) -> list:
+    """At most `limit` items, evenly spaced in `key` order."""
+    items = sorted(items, key=key)
+    if len(items) <= limit:
+        return items
+    return [items[i] for i in np.unique(np.linspace(0, len(items) - 1, limit).round().astype(int))]
 
 
 def scale_box(box, frame, size):
@@ -63,6 +71,10 @@ def verdict(measures: dict, settings) -> str | None:
     if measures.get("aligned") is False:
         return "no_landmarks"
     return None
+
+
+def photo_order(asset: dict) -> tuple:
+    return asset.get("fileCreatedAt") or "", asset["id"]
 
 
 def locate(immich: Immich, asset: dict, person_id: str, min_size: int) -> Candidate:
@@ -130,16 +142,13 @@ def _apply(c: Candidate, measures: dict, embedding: np.ndarray | None, settings)
 
 def analyze_faces(immich: Immich, model, job: Job, settings, progress=lambda **_: None) -> None:
     person_id = job.person["id"]
-    photos = immich.photos(person_id, settings.YEARS_FILTER)
+    photos = spread(immich.photos(person_id, settings.YEARS_FILTER), 3 * MAX_CANDIDATES, key=photo_order)
     job.candidates = list(bounded_map(lambda a: locate(immich, a, person_id, settings.MIN_FACE_SIZE), photos))
-
-    usable = sorted((c for c in job.candidates if c.reason is None), key=lambda c: (c.taken, c.asset_id))
-    if len(usable) > MAX_CANDIDATES:  # Sample evenly through time.
-        keep = set(np.linspace(0, len(usable) - 1, MAX_CANDIDATES).round().astype(int))
-        for i, c in enumerate(usable):
-            if i not in keep:
-                c.reason = "sample_limit"
-        usable = [c for c in usable if c.reason is None]
+    usable = spread([c for c in job.candidates if c.reason is None], MAX_CANDIDATES, lambda c: (c.taken, c.asset_id))
+    kept = {id(c) for c in usable}
+    for c in job.eligible:
+        if id(c) not in kept:
+            c.reason = "sample_limit"
 
     cache = FaceCache(settings.CACHE_DIR)
     todo = [c for c in usable if not ((hit := cache.load(c)) and _apply(c, *hit, settings))]

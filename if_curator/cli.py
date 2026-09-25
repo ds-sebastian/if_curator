@@ -99,14 +99,19 @@ def summarize(jobs: list[Job]) -> Table:
     return table
 
 
-def connect(settings):
+def connect(settings) -> tuple[Immich, list[dict]]:
+    """Ask for whatever connection details are missing, and save them once Immich accepts them."""
     if not settings.IMMICH_URL or not settings.API_KEY:
         console.print("Connect to Immich. This is saved to .immich_config.json.")
-        url = settings.IMMICH_URL or Prompt.ask("Immich URL [dim](e.g. http://192.168.1.5:2283)[/]", console=console)
-        key = settings.API_KEY or Prompt.ask("API key", password=True, console=console)
-        save_connection(url, key)
-        settings = replace(settings, IMMICH_URL=url, API_KEY=key)
-    return settings, Immich(settings.IMMICH_URL, settings.API_KEY)
+    url = settings.IMMICH_URL or Prompt.ask("Immich URL [dim](e.g. http://192.168.1.5:2283)[/]", console=console)
+    key = settings.API_KEY or Prompt.ask("API key", password=True, console=console)
+    url = url.strip() if "://" in url else f"http://{url.strip()}"
+    immich = Immich(url, key.strip())
+    with console.status("Connecting to Immich…"):
+        people = sorted(immich.people(), key=lambda p: p["name"].casefold())
+    if not settings.IMMICH_URL or not settings.API_KEY:
+        save_connection(url, key.strip())
+    return immich, people
 
 
 def positive(text: str) -> int:
@@ -141,9 +146,7 @@ def run(args: argparse.Namespace) -> int:
     except ValueError as error:
         console.print(f"[red]Configuration error: {error}")
         return 2
-    settings, immich = connect(settings)
-    with console.status("Connecting to Immich…"):
-        people = sorted(immich.people(), key=lambda p: p["name"].casefold())
+    immich, people = connect(settings)
     if not people:
         console.print("[red]Immich has no named people yet.")
         return 1
@@ -198,12 +201,19 @@ def main(argv=None) -> None:
         format="%(message)s",
         handlers=[RichHandler(console=console, show_path=False)],
     )
+    logging.getLogger("urllib3").setLevel(logging.DEBUG if args.verbose else logging.ERROR)
     try:
         code = run(args)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         console.print("\nCancelled.")
         code = 130
-    except (ImmichError, LookupError, RuntimeError, requests.RequestException) as error:
+    except requests.RequestException as error:
+        if args.verbose:
+            raise
+        detail = error.response.status_code if error.response is not None else type(error).__name__
+        console.print(f"[red]Immich request failed ({detail}). Check IMMICH_URL and that Immich is running.")
+        code = 1
+    except (ImmichError, LookupError, RuntimeError) as error:
         if args.verbose:
             raise
         console.print(f"[red]{error}")

@@ -56,11 +56,14 @@ frigate_train/2026-09-25_214913/
 ```
 
 Copy each person's folder into Frigate's face library (`/media/frigate/clips/faces/`) and
-restart Frigate. The folder name is the name Frigate shows. You can also upload the images
-in Frigate's **Face Library**. Either way Frigate ends up with the same crops.
+restart Frigate. The folder name is the name Frigate shows. Copying is the most faithful
+option: each file is already the crop Frigate would store. Uploading in Frigate's
+**Face Library** also works, but Frigate detects the face again, so its crop will differ
+slightly.
 
 Queue people who look alike (siblings, parents and children) in the same run, so faces
-Immich mixed up between them are left out.
+Immich mixed up between them are left out. For children, use only the last year or two
+of photos: faces from years ago won't help Frigate recognize them today.
 
 ## Settings
 

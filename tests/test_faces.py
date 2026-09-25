@@ -91,8 +91,9 @@ def test_undetected_faces_are_rejected(tmp_path):
 
 
 def test_large_libraries_are_sampled_through_time(tmp_path, monkeypatch):
-    monkeypatch.setattr(faces, "MAX_CANDIDATES", 3)
+    monkeypatch.setattr(faces, "MAX_CANDIDATES", 2)
     job = Job({"id": "p1", "name": "P"}, 3)
-    analyze_faces(FakeImmich([photo(i) for i in range(9)]), FakeFaces(), job, settings(tmp_path))
-    assert [c.asset_id for c in job.eligible] == ["asset-000", "asset-004", "asset-008"]
-    assert sum(c.reason == "sample_limit" for c in job.candidates) == 6
+    analyze_faces(FakeImmich([photo(i) for i in range(20)]), FakeFaces(), job, settings(tmp_path))
+    assert len(job.candidates) == 6  # face boxes are only looked up for 3x the analysis limit
+    assert [c.asset_id for c in job.eligible] == ["asset-000", "asset-019"]
+    assert sum(c.reason == "sample_limit" for c in job.candidates) == 4

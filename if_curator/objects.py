@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .faces import MAX_CANDIDATES
+from .faces import MAX_CANDIDATES, photo_order, spread
 from .immich import DOWNLOAD_ERRORS, Immich, bounded_map
 from .selection import Candidate, Job
 
@@ -44,9 +44,7 @@ class ObjectModel:
 
 def analyze_objects(immich: Immich, model: ObjectModel, job: Job, settings, progress=lambda **_: None) -> None:
     class_id = model.class_id(job.object_class)
-    photos = sorted(immich.photos(job.person["id"], settings.YEARS_FILTER), key=lambda a: a.get("fileCreatedAt", ""))
-    if len(photos) > MAX_CANDIDATES:
-        photos = [photos[i] for i in np.unique(np.linspace(0, len(photos) - 1, MAX_CANDIDATES).round().astype(int))]
+    photos = spread(immich.photos(job.person["id"], settings.YEARS_FILTER), MAX_CANDIDATES, key=photo_order)
 
     def fetch(asset):
         try:

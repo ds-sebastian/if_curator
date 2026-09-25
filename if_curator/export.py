@@ -1,6 +1,7 @@
 """Write each person's selected images to a new run folder."""
 
 import json
+import logging
 import re
 import shutil
 from collections import Counter
@@ -14,6 +15,8 @@ from . import __version__
 from .faces import CONTEXT, fetch_region
 from .immich import DOWNLOAD_ERRORS, Immich, bounded_map
 from .selection import Candidate, Job
+
+log = logging.getLogger(__name__)
 
 
 def folder_names(jobs: list[Job]) -> list[str]:
@@ -51,6 +54,7 @@ def _write(job: Job, folder: Path, immich: Immich, faces, sources: list[str], pr
         encoded = _encode(job, faces, regions)
         if encoded:
             data, extension, source = encoded
+            folder.mkdir(exist_ok=True)
             path = folder / f"{len(images):03d}{extension}"
             path.write_bytes(data)
             images.append(
@@ -62,6 +66,10 @@ def _write(job: Job, folder: Path, immich: Immich, faces, sources: list[str], pr
                     "source": source,
                     **candidate.measures,
                 }
+            )
+        else:
+            log.warning(
+                "Skipped photo %s of %s: couldn't download it or find the face again", candidate.asset_id, job.name
             )
         progress()
     return images
@@ -81,14 +89,13 @@ def export(jobs: list[Job], immich: Immich, faces, settings, progress=lambda: No
     people = []
     try:
         for job, name in zip(jobs, folder_names(jobs)):
-            (staging / name).mkdir()
             images = _write(job, staging / name, immich, faces, sources, progress)
             reasons = Counter(c.reason for c in job.candidates if c.reason)
             people.append(
                 {
                     "name": job.name,
                     "id": job.person["id"],
-                    "folder": name,
+                    "folder": name if images else None,
                     "object_class": job.object_class,
                     "photos": len({c.asset_id for c in job.candidates}),
                     "usable": len(job.eligible),
