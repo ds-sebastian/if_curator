@@ -37,6 +37,9 @@ REASONS = {
     "no_landmarks": "no landmarks",
     "unlike_person": "unlike this person",
     "no_object": "object not found",
+    "no_match": "matches no one",
+    "ambiguous": "could be several people",
+    "same_event": "same event",
 }
 
 
@@ -83,11 +86,12 @@ def choose_people(people: list[dict], names: list[str]) -> list[dict]:
             return list({p["id"]: p for p in chosen}.values())
 
 
-def summarize(jobs: list[Job]) -> Table:
+def summarize(jobs: list[Job], snapshots: bool = False) -> Table:
     faces = any(job.object_class is None for job in jobs)
+    columns = ["Photos", "Usable", "Selected"] + ["Recognized"] * faces + ["Frigate"] * snapshots
     table = Table(box=None, header_style="bold", pad_edge=False)
     table.add_column("Person")
-    for column in ("Photos", "Usable", "Selected") + (("Recognized",) if faces else ()):
+    for column in columns:
         table.add_column(column, justify="right")
     table.add_column("Top rejections", style="dim")
     for job in jobs:
@@ -95,8 +99,26 @@ def summarize(jobs: list[Job]) -> Table:
         row = [job.name, str(len({c.asset_id for c in job.candidates})), str(len(job.eligible)), str(len(job.selected))]
         if faces:
             row.append("–" if job.recognized is None else f"{job.recognized:.0%}")
+        if snapshots:
+            row.append(str(len(job.snapshots)))
         table.add_row(*row, ", ".join(f"{reason} {count}" for reason, count in reasons.most_common(3)))
     return table
+
+
+def match_snapshots(jobs: list[Job], model, settings, columns) -> list | None:
+    """Label Frigate's snapshots, or explain why not; this step is optional."""
+    from .snapshots import Frigate, analyze_snapshots, label_snapshots
+
+    try:
+        with Progress(*columns, console=console) as progress:
+            task = progress.add_task("Frigate snapshots", total=None)
+            frigate = Frigate(settings.FRIGATE_URL, settings.FRIGATE_USER, settings.FRIGATE_PASSWORD)
+            snapshots = analyze_snapshots(frigate, model, settings, partial(progress.update, task))
+    except requests.RequestException as error:
+        console.print(f"[yellow]Skipping Frigate snapshots: couldn't read them from {settings.FRIGATE_URL} ({error}).")
+        return None
+    label_snapshots(snapshots, jobs, settings.FRIGATE_RECOGNITION_THRESHOLD)
+    return snapshots
 
 
 def connect(settings) -> tuple[Immich, list[dict]]:
@@ -166,12 +188,18 @@ def run(args: argparse.Namespace) -> int:
         for job in jobs:
             analyze(immich, model, job, settings, partial(progress.update, progress.add_task(job.name, total=None)))
     select(jobs, settings.FRIGATE_RECOGNITION_THRESHOLD)
+    snapshots = match_snapshots(jobs, model, settings, columns) if settings.FRIGATE_URL and not args.object else None
 
     console.print()
-    console.print(summarize(jobs))
+    console.print(summarize(jobs, snapshots is not None))
     if any(job.recognized is not None for job in jobs):
         console.print("[dim]Recognized: how many of the other usable photos Frigate would recognize with this set.[/]")
-    total = sum(len(job.selected) for job in jobs)
+    if snapshots is not None:
+        reasons = Counter(REASONS.get(c.reason, c.reason) for c in snapshots if c.reason)
+        labeled = sum(len(job.snapshots) for job in jobs)
+        details = "".join(f", {reason} {count}" for reason, count in reasons.most_common())
+        console.print(f"[dim]Frigate: {labeled} of {len(snapshots)} unlabeled snapshots labeled{details}.[/]")
+    total = sum(len(job.selected) + len(job.snapshots) for job in jobs)
     if not total:
         console.print("\n[yellow]Nothing to export.")
         return 1

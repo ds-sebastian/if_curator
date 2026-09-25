@@ -80,6 +80,26 @@ For each person:
 Large libraries are sampled evenly through time: face boxes are looked up for at most
 3,000 photos, and at most 1,000 usable faces are analyzed.
 
+## Frigate's snapshots
+
+With `FRIGATE_URL` set, if-curator also reads the face attempts Frigate saves from its
+cameras (the Face Library's Train tab). Frigate stores each one as the tight crop it
+recognized, so each is embedded directly, after the same quality checks as library faces.
+
+A snapshot is labeled with the queued person whose robust Immich center it is most
+similar to, but only if:
+
+- its cosine to that center is at least 0.41, the point where Frigate reports a 0.9
+  score (set by `FRIGATE_RECOGNITION_THRESHOLD`). This is judged against the whole
+  library, not a 30-image selection.
+- it beats every other queued person by at least 0.1.
+
+A wrong label pulls the center toward someone else, so it costs more than a missed one:
+the rules favor precision. Attempts from one Frigate event are near-duplicates, so only
+the best-matching one per event is kept. The survivors are chosen by farthest-point
+sampling, up to the image count. In testing, true matches scored 0.56 to 0.88 against the
+Immich center, and a stranger at most 0.15.
+
 ## Reading the summary
 
 | Column | Meaning |
@@ -88,6 +108,7 @@ Large libraries are sampled evenly through time: face boxes are looked up for at
 | Usable | Faces that passed every check above |
 | Selected | Images chosen for export |
 | Recognized | Share of the *unselected* usable faces that Frigate would recognize (score ≥ 0.9, and this person rather than another queued one) with the selected set |
+| Frigate | Frigate snapshots labeled as this person (only with `FRIGATE_URL`) |
 
 "Recognized" is a sanity check on library photos, not a camera accuracy estimate. A low
 value means the selected set doesn't represent this person's photos well; look at the

@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 CONNECTION_FILE = Path(".immich_config.json")
-SECRETS = ("IMMICH_URL", "API_KEY")
+SECRETS = ("IMMICH_URL", "API_KEY", "FRIGATE_URL", "FRIGATE_USER", "FRIGATE_PASSWORD")
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,9 @@ class Settings:
     USE_FULL_RESOLUTION: bool = True
     FRIGATE_RECOGNITION_THRESHOLD: float = 0.9
     FORCE_CPU: bool = False
+    FRIGATE_URL: str = ""
+    FRIGATE_USER: str = ""
+    FRIGATE_PASSWORD: str = ""
 
     def public(self) -> dict:
         return {k: v for k, v in asdict(self).items() if k not in SECRETS}
