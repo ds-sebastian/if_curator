@@ -1,84 +1,79 @@
 import hashlib
-from unittest.mock import Mock
 
 import cv2
 import numpy as np
 import pytest
-from PIL import Image
-from scipy.stats import trim_mean
 
 from if_curator import frigate
-from if_curator.config import Config
+from if_curator.frigate import align, confidence, iou, preprocess, trimmed_mean
 
 
-@pytest.mark.parametrize("n", [1, 2, 5, 6, 7, 13, 14, 30])
-def test_raw_class_mean_matches_stable_upstream(n):
-    vectors = np.random.default_rng(n).normal(size=(n, 512)).astype(np.float32)
-    vectors[0] *= 5
-    actual = frigate.class_mean(vectors)
-    np.testing.assert_array_equal(actual, trim_mean(vectors, 0.15, axis=0))
-    assert not np.allclose(actual, trim_mean([frigate.unit(v) for v in vectors], 0.15, axis=0))
+def test_trimmed_mean_matches_scipy_definition():
+    values = np.random.default_rng(0).normal(size=(20, 512))
+    cut = int(0.15 * 20)  # scipy trims int(proportion * n) from each end of every coordinate
+    expected = np.sort(values, axis=0)[cut:-cut].mean(axis=0)
+    assert np.allclose(trimmed_mean(values), expected)
+    assert np.allclose(trimmed_mean(values[:6]), values[:6].mean(axis=0))  # too few to trim
 
 
-def test_frigate_ndarray_preprocessing_preserves_bgr_and_padding():
-    image = np.full((80, 160, 3), (220, 100, 10), np.uint8)
-    tensor = frigate.preprocess(image)
-    assert tensor.shape == (1, 3, 112, 112) and tensor.dtype == np.float32
-    np.testing.assert_allclose(tensor[0, :, 56, 56], np.array([220, 100, 10]) / 127.5 - 1, atol=1e-7)
-    assert (tensor[:, :, :28] == -1).all()
-    assert (tensor[:, :, 84:] == -1).all()
+def test_confidence_curve():
+    assert confidence(0.3) == pytest.approx(0.5)
+    assert round(confidence(0.41), 2) == 0.9
+    assert confidence(0.0) < 0.01 < 0.99 < confidence(0.6)
 
 
-def test_resize_rounds_short_dimension_to_multiple_of_four():
-    image = np.full((117, 200, 3), 150, np.uint8)
-    tensor = frigate.preprocess(image)
-    # 65.52 -> 64, leaving 24 rows of padding at either edge.
-    assert (tensor[:, :, :24] == -1).all()
-    assert (tensor[:, :, 24:88] > 0).all()
-    assert (tensor[:, :, 88:] == -1).all()
+def test_iou():
+    assert iou((0, 0, 10, 10), (0, 0, 10, 10)) == 1
+    assert iou((0, 0, 10, 10), (5, 0, 15, 10)) == pytest.approx(1 / 3)
+    assert iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0
 
 
-@pytest.mark.parametrize("layout", [(68, 2), (1, 68, 2), (68, 1, 2)])
-def test_alignment_matches_upstream_eye_geometry(layout):
-    image = np.random.default_rng(0).integers(0, 255, (200, 180, 3), dtype=np.uint8)
+def test_preprocess_keeps_bgr_order_and_pads():
+    face = np.zeros((224, 112, 3), np.uint8)
+    face[..., 0] = 255  # blue in BGR
+    tensor = preprocess(face)
+    assert tensor.shape == (1, 3, 112, 112)
+    assert tensor[0, 0, 56, 56] == pytest.approx(1.0) and tensor[0, 2, 56, 56] == pytest.approx(-1.0)
+    assert tensor[0, 0, 56, 0] == pytest.approx(-1.0)  # padding left and right of the narrow face
+
+
+def test_align_puts_eyes_where_frigate_does():
+    """Eyes end up level, 30% of the width apart, centered at 35% of the height."""
+    image = np.zeros((100, 100, 3), np.uint8)
     landmarks = np.zeros((68, 2))
-    landmarks[42:48] = [130.9, 80.9]
-    landmarks[36:42] = [60.9, 100.9]
-    matrix = cv2.getRotationMatrix2D((95, 90), np.degrees(np.arctan2(20, -70)) - 180, 54 / np.sqrt(5300))
-    matrix[0, 2] += 90 - 95
-    matrix[1, 2] += 70 - 90
-    expected = cv2.warpAffine(image, matrix, (180, 200), flags=cv2.INTER_CUBIC)
-    np.testing.assert_array_equal(frigate.align(image, landmarks.reshape(layout)), expected)
+    landmarks[36:42], landmarks[42:48] = (30, 40), (70, 30)  # image-left eye, image-right eye; tilted
+    for x, y in ((30, 40), (70, 30)):
+        cv2.circle(image, (x, y), 2, (255, 255, 255), -1)
+    aligned = align(image, landmarks.reshape(1, 68, 2))[..., 0].astype(float)
+    ys, xs = np.nonzero(aligned > 100)
+    left, right = xs < 50, xs >= 50
+    assert np.average(xs[left], weights=aligned[ys, xs][left]) == pytest.approx(35, abs=1.5)
+    assert np.average(xs[right], weights=aligned[ys, xs][right]) == pytest.approx(65, abs=1.5)
+    assert np.average(ys, weights=aligned[ys, xs]) == pytest.approx(35, abs=1.5)
 
 
-def test_confidence_is_sigmoid_not_cosine_and_includes_blur(monkeypatch):
-    assert frigate.confidence(0.3) == 0.5
-    assert frigate.confidence(0.5) == 0.98
-    assert frigate.confidence(0.5, 0.06) == 0.92
-    assert frigate.confidence(-1, 0.06) == 0
-    assert frigate.blur_reduction(np.ones((112, 112, 3), np.uint8)) == 0.06
-    monkeypatch.setattr(Config, "FRIGATE_BLUR_CONFIDENCE_FILTER", False)
-    assert frigate.blur_reduction(np.ones((112, 112, 3), np.uint8)) == 0
+def test_fetch_model_verifies_checksum(tmp_path, monkeypatch):
+    class Download:
+        def __init__(self, data):
+            self.data = data
 
+        def __enter__(self):
+            return self
 
-def test_model_checksum_is_enforced_without_loading(tmp_path, monkeypatch):
-    (tmp_path / "test").write_bytes(b"bad")
-    monkeypatch.setitem(frigate.MODEL_HASHES, "test", hashlib.sha256(b"good").hexdigest())
-    with pytest.raises(ValueError, match="checksum"):
-        frigate.ensure_model(tmp_path, "test")
+        def __exit__(self, *exc):
+            return False
 
+        def raise_for_status(self):
+            pass
 
-def test_inference_uses_landmarks_and_keeps_raw_output():
-    model = object.__new__(frigate.FrigateModel)
-    landmarks = np.zeros((68, 2), dtype=np.float32)
-    landmarks[42:48], landmarks[36:42] = [80, 45], [30, 45]
-    model.landmarks = Mock()
-    model.landmarks.fit.return_value = True, np.array([[landmarks]])
-    model.session = Mock()
-    model.session.get_inputs.return_value = [Mock(name="input")]
-    model.session.get_inputs.return_value[0].name = "data"
-    expected = np.arange(512, dtype=np.float32) + 1
-    model.session.run.return_value = [np.array([expected])]
-    pixels = np.asarray(Image.new("RGB", (112, 112), (200, 70, 40)))
-    np.testing.assert_array_equal(model.get(pixels), expected)
-    assert model.session.run.call_args.args[1]["data"].shape == (1, 3, 112, 112)
+        def iter_content(self, size):
+            yield self.data
+
+    monkeypatch.setattr(frigate.requests, "get", lambda *a, **k: Download(b"good"))
+    monkeypatch.setitem(frigate.MODEL_HASHES, "model.onnx", hashlib.sha256(b"good").hexdigest())
+    assert frigate.fetch_model(tmp_path, "model.onnx").read_bytes() == b"good"
+
+    monkeypatch.setattr(frigate.requests, "get", lambda *a, **k: Download(b"evil"))
+    with pytest.raises(RuntimeError, match="checksum"):
+        frigate.fetch_model(tmp_path / "other", "model.onnx")
+    assert not any((tmp_path / "other").iterdir())

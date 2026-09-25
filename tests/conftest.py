@@ -1,66 +1,65 @@
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
-from PIL import Image
 
-from if_curator.config import Config
-from if_curator.faces import FaceCandidate
+from if_curator import config
 
 
 @pytest.fixture(autouse=True)
-def settings(monkeypatch, tmp_path):
-    for name in Config.setting_names():
-        monkeypatch.setattr(Config, name, getattr(type(Config), name))
-    monkeypatch.setattr(Config, "CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setattr(Config, "OUTPUT_DIR", str(tmp_path / "exports"))
+def isolated(tmp_path, monkeypatch):
+    """Run every test in an empty directory, away from real settings."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "CONNECTION_FILE", tmp_path / ".immich_config.json")
 
 
-@pytest.fixture
-def image():
-    rng = np.random.default_rng(2)
-    pixels = rng.integers(40, 220, (240, 320, 3), dtype=np.uint8)
-    pixels[:, :, 0] = np.minimum(pixels[:, :, 0].astype(int) + 30, 255)
-    return Image.fromarray(pixels.astype(np.uint8))
+def textured(width, height, seed=0):
+    """A sharp, colorful, mid-brightness image that passes every quality check."""
+    rng = np.random.default_rng(seed)
+    image = rng.integers(60, 200, (height, width, 3), dtype=np.uint8)
+    image[:, :, 0] //= 2
+    return image
 
 
-@pytest.fixture
-def metadata():
-    return dict(
-        id="face-a",
-        imageWidth=320,
-        imageHeight=240,
-        boundingBoxX1=60,
-        boundingBoxY1=40,
-        boundingBoxX2=200,
-        boundingBoxY2=200,
-    )
+def photo(index, person="p1", box=(100, 100, 300, 300), frame=(800, 600), **extra):
+    face = dict(zip(("boundingBoxX1", "boundingBoxY1", "boundingBoxX2", "boundingBoxY2"), box))
+    face |= {"id": f"face-{index}", "imageWidth": frame[0], "imageHeight": frame[1]}
+    asset = {"id": f"asset-{index:03d}", "checksum": f"sum-{index}", "fileCreatedAt": f"2025-01-{1 + index % 28:02d}"}
+    return asset | {"people": [{"id": person, "name": "P", "faces": [face]}]} | extra
 
 
-@pytest.fixture
-def candidate():
-    return FaceCandidate("asset-a", "person-a", "face-a")
+class FakeImmich:
+    """Serves `photo()` assets; every image is textured and matches its face box frame."""
+
+    def __init__(self, assets, broken=()):
+        self.assets, self.broken, self.downloads = assets, set(broken), []
+
+    def photos(self, person_id, years):
+        return [a for a in self.assets if any(p["id"] == person_id for p in a["people"])]
+
+    def target_faces(self, asset, person_id):
+        return [f for p in asset["people"] if p["id"] == person_id for f in p["faces"]]
+
+    def image(self, asset_id, original=False):
+        self.downloads.append((asset_id, original))
+        if (asset_id, original) in self.broken:
+            raise OSError("cannot decode")
+        face = next(a for a in self.assets if a["id"] == asset_id)["people"][0]["faces"][0]
+        scale = 2 if original else 1
+        return textured(face["imageWidth"] * scale, face["imageHeight"] * scale, seed=len(self.downloads))
 
 
-@pytest.fixture
-def fake_app(monkeypatch):
-    from if_curator import faces
+class FakeFaces:
+    """Finds the target exactly and embeds each face as its person's direction plus noise."""
 
-    def detect(app, image, expected):
-        from cv2 import COLOR_RGB2BGR, cvtColor
+    device = "CPU"
 
-        return cvtColor(np.asarray(image), COLOR_RGB2BGR), SimpleNamespace(
-            det_score=0.95,
-            bbox=np.array(expected),
-            kps=np.array([[40, 50], [80, 50], [60, 70], [45, 90], [75, 90]], dtype=np.float32),
-        )
+    def __init__(self, vectors=None):
+        self.vectors = vectors or {}
+        self.embedded = 0
 
-    embedding = np.arange(512, dtype=np.float32) + 1
-    recognition = SimpleNamespace(get=lambda bgr, target: embedding.copy())
-    app = SimpleNamespace(models={"recognition": recognition})
-    recognition.fingerprint = "frigate-test"
-    monkeypatch.setattr(faces, "get_frigate_model", lambda: recognition)
-    monkeypatch.setattr(faces, "detect_target", detect)
-    monkeypatch.setattr(faces, "get_insightface_app", lambda: app)
-    monkeypatch.setattr(faces, "model_fingerprint", lambda app: "test-fingerprint")
-    return app
+    def detect(self, image, target):
+        return tuple(int(v) for v in target)
+
+    def embed(self, faces):
+        self.embedded += len(faces)
+        rng = np.random.default_rng(self.embedded)
+        return [np.eye(512)[0] * 10 + rng.normal(0, 1, 512) for _ in faces]

@@ -1,75 +1,55 @@
 import numpy as np
-import pytest
 
-from if_curator.faces import FaceCandidate, select_face_candidates
-
-
-def candidate(index, vector=None, confidence=0.9):
-    if vector is None:
-        vector = np.eye(512)[index]
-    return FaceCandidate(
-        str(index),
-        "p",
-        str(index),
-        embedding=vector,
-        effective_dimensions=(120, 140),
-        measurements={"detection_confidence": confidence},
-        created_at=f"2020-01-{index + 1:02}",
-    )
+from if_curator.selection import Candidate, Job, farthest_points, geometric_median, select, unit
 
 
-@pytest.mark.parametrize("mode", ["time", "smart"])
-def test_tiny_pool_does_not_bypass_gates(mode):
-    good, bad, invalid = candidate(0), candidate(1), candidate(2, np.zeros(512))
-    bad.reasons = ["Blurry"]
-    assert select_face_candidates([good, bad, invalid], 30, mode) == [good]
-    assert "invalid_embedding" in invalid.reasons
-    assert select_face_candidates([], 30, mode) == []
+def direction(*weights):
+    vector = np.zeros(512)
+    vector[: len(weights)] = weights
+    return vector
 
 
-@pytest.mark.parametrize("limit", [0, -1, True, 2.5, "auto"])
-def test_invalid_limits(limit):
-    with pytest.raises(ValueError):
-        select_face_candidates([], limit)
+def job(name, vectors, count=10, object_class=None):
+    candidates = [Candidate(f"{name}-{i}", embedding=np.asarray(v, float)) for i, v in enumerate(vectors)]
+    return Job({"id": name, "name": name}, count, object_class, candidates)
 
 
-def test_duplicates_keep_higher_quality():
-    low, high = candidate(0, confidence=0.8), candidate(1, np.eye(512)[0], confidence=0.99)
-    assert select_face_candidates([low, high], 30) == [high]
-    assert low.reasons == ["not_selected_objective"]
-    # Identical embeddings are not evidence that these were duplicate captures.
+def test_farthest_points_start_typical_then_spread():
+    units = unit([direction(1, 0), direction(1, 0.1), direction(1, -0.1), direction(1, 1), direction(1, -1)])
+    chosen = farthest_points(units, 3)
+    assert chosen[0] == 0 and set(chosen[1:]) == {3, 4}
 
 
-def test_deterministic_and_ceiling():
-    def run(order):
-        return [c.asset_id for c in select_face_candidates([candidate(i) for i in order], 3)]
-
-    assert run(range(8)) == run(reversed(range(8)))
-    assert len(run(range(8))) == 3
-
-
-def test_outliers_and_secondary_cluster(monkeypatch):
-    rng = np.random.default_rng(3)
-    records = []
-    for i in range(30):
-        center = np.eye(512)[0 if i < 20 else 1]
-        records.append(candidate(i, center + rng.normal(0, 0.018, 512)))
-    outlier = candidate(31, np.eye(512)[20])
-    records.append(outlier)
-    selected = select_face_candidates(records, 8)
-    assert "isolated_outlier" in outlier.reasons
-    assert any(int(c.asset_id) >= 20 for c in selected)
-    assert any(int(c.asset_id) < 20 for c in selected)
+def test_farthest_points_skip_duplicates_and_never_repeat():
+    units = unit([direction(1, 0), direction(1, 0.01), direction(0, 1)])
+    chosen = farthest_points(units, 10)
+    assert len(chosen) == 2 and 2 in chosen  # 0 and 1 are near-duplicates
+    assert sorted(farthest_points(units, 10, duplicate=np.inf)) == [0, 1, 2]
 
 
-def test_zero_dispersion_skips_outlier_gate():
-    records = [candidate(i) for i in range(10)]
-    assert 0 < len(select_face_candidates(records, 30)) <= 10
-    assert not any("isolated_outlier" in c.reasons for c in records)
+def test_geometric_median_ignores_a_minority():
+    rng = np.random.default_rng(0)
+    inliers = [direction(1) + rng.normal(0, 0.01, 512) for _ in range(7)]
+    units = unit(np.vstack(inliers + [direction(0, 1), direction(0, 0, 1), direction(0, 1, 1)]))
+    assert geometric_median(units) @ unit(direction(1)) > 0.99
 
 
-def test_invalid_embeddings():
-    vectors = [np.full(512, np.nan), np.ones(511), np.ones((1, 512)), np.zeros(512)]
-    records = [candidate(i, vector) for i, vector in enumerate(vectors)]
-    assert select_face_candidates(records, 30) == []
-    assert all(c.reasons == ["invalid_embedding"] for c in records)
+def test_select_drops_wrong_faces_and_scores_held_out():
+    rng = np.random.default_rng(1)
+    alice = [direction(1, 0) + rng.normal(0, 0.03, 512) for _ in range(12)]
+    bob = [direction(0.5, 1) + rng.normal(0, 0.03, 512) for _ in range(12)]
+    stranger = direction(0, 0, 1)
+    look_alike = direction(0.4, 1)  # tagged as Alice but closer to Bob
+    jobs = [job("alice", alice + [stranger, look_alike], count=3), job("bob", bob, count=3)]
+    select(jobs, recognition_threshold=0.9)
+    reasons = {c.asset_id: c.reason for c in jobs[0].candidates if c.reason}
+    assert reasons == {"alice-12": "unlike_person", "alice-13": "resembles bob"}
+    assert all(len(j.selected) == 3 and j.recognized == 1.0 for j in jobs)
+    assert not {id(c) for c in jobs[0].selected} & {id(c) for c in jobs[1].selected}
+
+
+def test_objects_are_spread_but_not_identity_checked():
+    objects = job("rex", [direction(1), direction(0, 1), direction(0, 0, 1)], count=2, object_class="dog")
+    select([objects], recognition_threshold=0.9)
+    assert len(objects.selected) == 2 and objects.recognized is None
+    assert all(c.reason is None for c in objects.candidates)

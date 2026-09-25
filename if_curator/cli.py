@@ -1,431 +1,211 @@
-"""Interactive CLI for if-curator."""
+"""Pick people from Immich, choose their images, and export them for Frigate."""
 
 import argparse
-import hashlib
 import logging
+from collections import Counter
+from dataclasses import replace
+from functools import partial
 
-from rich import print as rprint
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+import requests
+from rich.columns import Columns
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
-from .camera import embed_samples, load_manifest
-from .config import Config, ConfigManager
-from .diversity import select_diverse_assets
-from .embeddings import is_embedding_available
-from .faces import FacePipelineError, prepare_face_candidates
-from .frigate import get_frigate_model
-from .image_processing import process_full_mode, process_object_mode
-from .immich_api import fetch_all_assets, fetch_full_image, fetch_preview_image, filter_recent_assets, get_people
-from .logging import console, setup_logging
-from .runs import RunWorkspace, person_directory
-from .selection import evaluate, select_jobs
+from . import __version__
+from .config import load_settings, save_connection
+from .immich import Immich, ImmichError
+from .selection import Job, select
 
-logger = logging.getLogger(__name__)
+console = Console(highlight=False)
 
-# Strategy presets: (limit, mode_name)
-STRATEGY_PRESETS = {
-    "1": ("auto", "Auto Diversity"),
-    "2": (30, "Standard (30)"),
-    "3": (100, "Broad (100)"),
+REASONS = {
+    "edited": "edited in Immich",
+    "several_faces": "tagged twice",
+    "no_face_box": "no face box",
+    "too_small": "face too small",
+    "sample_limit": "over sample limit",
+    "download_failed": "download failed",
+    "coordinate_mismatch": "box doesn't fit photo",
+    "no_face_detected": "Frigate finds no face",
+    "blurry": "blurry",
+    "too_dark": "too dark",
+    "too_bright": "too bright",
+    "grayscale": "grayscale",
+    "no_landmarks": "no landmarks",
+    "unlike_person": "unlike this person",
+    "no_object": "object not found",
 }
 
 
-def _get_strategy_choice(has_embedding: bool, entity_type: str) -> tuple[int | str, str]:
-    """Prompt user for training strategy and return (limit, selection_mode)."""
-    if entity_type == "face":
-        if not has_embedding:
-            raise FacePipelineError("InsightFace unavailable; cannot validate face candidates")
-        rprint(f"  1. Centroid (up to {Config.FACE_MAX_IMAGES}) [Recommended]")
-        rprint("  2. Starter (up to 5)")
-        rprint("  3. Custom count")
-        rprint("  4. Skip")
-        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1")
-        if choice == "4":
-            return 0, "skip"
-        if choice == "3":
-            limit = 0
-            while limit <= 0:
-                limit = IntPrompt.ask("Maximum images (positive integer)", default=30)
-            mode = "smart" if Confirm.ask("Optimize the Frigate identity centroid?", default=True) else "time"
-            return limit, mode
-        return (Config.FACE_MAX_IMAGES if choice == "1" else 5), "smart"
-
-    model_name = "InsightFace" if entity_type == "face" else "SigLIP"
-
-    if has_embedding:
-        rprint("  [bold]1.[/bold] Auto (Objective Diversity) [green][Recommended][/green]")
-        rprint("     [dim]• Dynamically selects images until redundancy starts[/dim]")
-        rprint("  [bold]2.[/bold] Standard (30 images)")
-        rprint("  [bold]3.[/bold] Broad (100 images)")
-        rprint("  [bold]4.[/bold] Custom Count")
-        rprint("  [bold]5.[/bold] Skip")
-
-        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4", "5"], default="1")
-
-        if choice == "5":
-            return 0, "skip"
-        if choice == "4":
-            limit = IntPrompt.ask("Enter number of images", default=30)
-            mode = "smart" if Confirm.ask("Use Smart Diversity?", default=True) else "time"
-            return limit, mode
-        if choice in STRATEGY_PRESETS:
-            return STRATEGY_PRESETS[choice][0], "smart"
-        return 30, "smart"
-
-    # Fallback when embedding model not available
-    rprint(f"  [yellow]Note: {model_name} not available. Using Time Spread.[/yellow]")
-    rprint("  [bold]1.[/bold] Standard (30 images) [green][Recommended][/green]")
-    rprint("  [bold]2.[/bold] Broad (100 images)")
-    rprint("  [bold]3.[/bold] Custom Count")
-    rprint("  [bold]4.[/bold] Skip")
-
-    choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1")
-    limits = {"1": 30, "2": 100}
-    if choice == "3":
-        limits["3"] = IntPrompt.ask("Enter number of images", default=30)
-    return limits.get(choice, 0), "time" if choice != "4" else "skip"
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="if-curator", description=__doc__)
+    parser.add_argument("people", nargs="*", help="names from Immich (asks if omitted)")
+    parser.add_argument("-n", "--count", type=positive, help="images per person")
+    parser.add_argument("--years", type=positive, help="only use photos from the last N years")
+    parser.add_argument("--object", metavar="CLASS", help="export crops of this YOLO class instead of faces")
+    parser.add_argument("-y", "--yes", action="store_true", help="export without asking")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show debug logs")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser.parse_args(argv)
 
 
-def _configure_person(person: dict, workspace: RunWorkspace) -> dict | None:
-    """Configure training for a single person. Returns job dict or None."""
-    name = person["name"]
-    console.print(f"\nSelected: [bold green]{name}[/bold green]")
-
-    # Select training mode
-    rprint("\n[bold cyan]Training Mode:[/bold cyan]")
-    rprint("  [bold]1.[/bold] Face (Frigate Face Recognition)")
-    rprint("  [bold]2.[/bold] Object (Frigate Object Classification)")
-
-    mode_choice = Prompt.ask("Choice", choices=["1", "2"], default="1")
-    entity_type = "face" if mode_choice == "1" else "object"
-
-    config = {"name": name, "mode": entity_type}
-    if entity_type == "object":
-        config["object_class"] = Prompt.ask("Enter Object Class (e.g. dog, cat, car)", default="dog")
-
-    # Fetch and filter assets
-    years = IntPrompt.ask("Filter images older than (years)", default=Config.YEARS_FILTER)
-
-    console.print(f"Scanning for {name} ({entity_type})...")
-    with console.status("[bold green]Fetching assets...[/bold green]"):
-        all_assets = fetch_all_assets(person)
-        recent_assets = filter_recent_assets(all_assets, years=years)
-
-    rprint(f"  Found [bold]{len(all_assets)}[/bold] total, [bold]{len(recent_assets)}[/bold] in range ({years} years).")
-
-    if not recent_assets:
-        rprint("  [dim]Skipping (0 recent images).[/dim]")
-        return None
-
-    # Strategy selection
-    has_embedding = is_embedding_available(entity_type)
-    rprint(f"\n[bold cyan]Select Training Strategy for {name}:[/bold cyan]")
-
-    limit, selection_mode = _get_strategy_choice(has_embedding, entity_type)
-    if selection_mode == "skip":
-        return None
-
-    if entity_type == "face":
-        with Progress(
-            SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), console=console
-        ) as progress:
-            task = progress.add_task("Preparing and evaluating target faces...", total=None)
-            candidates, fingerprint = prepare_face_candidates(
-                recent_assets,
-                person["id"],
-                workspace.preparation_directory(person["id"]),
-                lambda c, t: progress.update(task, completed=c, total=t),
-            )
-        # Joint selection happens after all identities are queued.
-        selected = []
-        selected_assets = recent_assets
-        return {
-            "person": person,
-            "assets": selected_assets,
-            "limit": len(selected),
-            "config": config,
-            "candidates": candidates,
-            "selected_faces": selected,
-            "model_fingerprint": fingerprint,
-            "selection_mode": selection_mode,
-            "requested_limit": limit,
-            "years_filter": years,
-        }
-    selected_assets = _perform_selection(recent_assets, limit, name, selection_mode, entity_type)
-    return {
-        "person": person,
-        "assets": selected_assets,
-        "limit": len(selected_assets),
-        "config": config,
-        "selection_mode": selection_mode,
-        "requested_limit": limit,
-        "years_filter": years,
-    }
+def find_person(people: list[dict], query: str) -> dict:
+    query = query.strip()
+    if query.isdigit() and 1 <= int(query) <= len(people):
+        return people[int(query) - 1]
+    for matches in (
+        [p for p in people if p["name"].casefold() == query.casefold()],
+        [p for p in people if query.casefold() in p["name"].casefold()],
+    ):
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            names = ", ".join(sorted({p["name"] for p in matches})[:5])
+            raise LookupError(f"“{query}” matches several people ({names}). Use a number or the full name.")
+    raise LookupError(f"No one in Immich is called “{query}”.")
 
 
-def interactive_configure(people: list[dict], workspace: RunWorkspace) -> list[dict]:
-    """Interactive phase: select person(s), mode, and configure training strategy.
-
-    Supports multi-person batch mode — after configuring one person,
-    prompts to add another.
-    """
-    valid_people = sorted([p for p in people if p.get("name")], key=lambda x: x["name"])
-
-    if not valid_people:
-        rprint("[red]No people found with names in Immich.[/red]")
-        return []
-
-    jobs = []
-
+def choose_people(people: list[dict], names: list[str]) -> list[dict]:
+    if names:
+        return list({p["id"]: p for p in map(lambda n: find_person(people, n), names)}.values())
+    console.print(Columns([f"[dim]{i:>3}[/] {p['name']}" for i, p in enumerate(people, 1)], column_first=True))
     while True:
-        # Select person
-        console.print("\n[bold cyan]Select Person to Train:[/bold cyan]")
-        for idx, p in enumerate(valid_people, 1):
-            # Mark already-queued people
-            marker = " [dim](queued)[/dim]" if any(j["person"]["id"] == p["id"] for j in jobs) else ""
-            console.print(f"  [bold]{idx}.[/bold] {p['name']}{marker}")
-
-        p_choice = IntPrompt.ask("Enter Number", choices=[str(i) for i in range(1, len(valid_people) + 1)])
-        person = valid_people[p_choice - 1]
-
-        if any(j["person"]["id"] == person["id"] for j in jobs):
-            rprint("[yellow]This person is already queued.[/yellow]")
-            continue
-        job = _configure_person(person, workspace)
-        if job:
-            jobs.append(job)
-            workspace.record_jobs(jobs)
-
-        # Multi-person: ask to add another
-        if not Confirm.ask("\nAdd another person?", default=False):
-            break
-
-    return jobs
-
-
-def _perform_selection(assets: list, limit: int | str, name: str, selection_mode: str, entity_type: str) -> list:
-    """Run diversity selection with progress display."""
-    if selection_mode == "smart":
-        model_display = "InsightFace (face embeddings)" if entity_type == "face" else "SigLIP (visual embeddings)"
-        rprint(f"\n[cyan]Using {model_display} for diversity analysis...[/cyan]")
-
-        # Pre-load model to avoid interference with progress bar
-        is_embedding_available(entity_type)
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task(f"[cyan]Computing embeddings for {len(assets)} images...", total=None)
-            selected = select_diverse_assets(
-                assets,
-                limit,
-                name,
-                selection_mode=selection_mode,
-                entity_type=entity_type,
-                progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
-            )
-
-        label = f"Auto-diversity selected {len(selected)}" if limit == "auto" else f"Selected {len(selected)}"
-        rprint(f"  [green]{label} diverse images.[/green]")
-        return selected
-
-    rprint(f"\n[cyan]Using time-spread selection for {limit} images...[/cyan]")
-    with console.status(f"[bold]Selecting {limit} images evenly distributed over time...[/bold]"):
-        selected = select_diverse_assets(assets, limit, name, selection_mode="time", entity_type=entity_type)
-    rprint(f"  [green]Selected {len(selected)} images using time spread.[/green]")
-    return selected
-
-
-def _show_preview(jobs: list[dict]) -> None:
-    """Show a summary table of all queued jobs before execution."""
-    table = Table(title="📋 Training Job Preview", show_header=True, header_style="bold cyan")
-    table.add_column("Person", style="bold")
-    table.add_column("Mode", style="dim")
-    table.add_column("Selected", justify="right")
-    table.add_column("Scanned", justify="right")
-    table.add_column("Quality passed", justify="right")
-    table.add_column("Eligible", justify="right")
-    table.add_column("Date Range", style="dim")
-
-    for job in jobs:
-        name = job["person"]["name"]
-        mode = job["config"].get("mode", "face")
-        count = str(job["limit"])
-
-        # Date range
-        dates = sorted(a.get("fileCreatedAt", "")[:10] for a in job["assets"] if a.get("fileCreatedAt"))
-        date_range = f"{dates[0]} → {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "—")
-
-        candidates = job.get("candidates", [])
-        counts = job.get("selection_report", {}).get("counts", {})
-        table.add_row(
-            name,
-            mode,
-            count,
-            str(len(candidates)) if mode == "face" else "—",
-            str(counts.get("quality_passed", 0)) if mode == "face" else "—",
-            str(counts.get("eligible", 0)) if mode == "face" else "—",
-            date_range,
-        )
-
-    console.print()
-    console.print(table)
-    if any("selection_report" in job for job in jobs):
-        console.print(
-            "[dim]Eligible = quality passed after duplicate and isolation filtering. "
-            "Reference cosine is not independent recognition confidence.[/dim]"
-        )
-    for job in jobs:
-        report = job.get("selection_report")
-        if report:
-            console.print(
-                f"{job['person']['name']}: {report['reference_source']}; "
-                f"centroid/reference cosine {report['centroid_reference_cosine']}; "
-                f"{job['limit']} / {job['requested_limit']} images; "
-                f"{report['stop_reason'].replace('_', ' ')}"
-            )
-    console.print()
-
-
-def execute_jobs(jobs: list[dict], workspace: RunWorkspace | None = None):
-    """Publish an isolated run; faces are copied byte-for-byte from evaluation."""
-    if not jobs:
-        return None
-    workspace = workspace or RunWorkspace(Config.OUTPUT_DIR)
-    try:
-        for job in jobs:
-            mode = job["config"].get("mode", "face")
-            if mode == "face":
-                workspace.export_faces(job)
-            else:
-                person = job["person"]
-                directory = workspace.path / person_directory(person["name"], person["id"], mode)
-                directory.mkdir(exist_ok=False)
-                job["object_outputs"] = []
-                for count, asset in enumerate(job["assets"]):
-                    image = (
-                        fetch_full_image(asset["id"])
-                        if Config.USE_FULL_RESOLUTION
-                        else fetch_preview_image(asset["id"])
-                    )
-                    if image is None:
-                        raise ValueError(f"Could not download asset {asset['id']}")
-                    try:
-                        if mode == "object":
-                            process_object_mode(image, job["config"], str(directory), count)
-                        else:
-                            process_full_mode(image, str(directory), count)
-                    finally:
-                        image.close()
-                    for output in sorted(directory.glob(f"{count}*.jpg")):
-                        # Include only this asset's numeric prefix.
-                        if output.stem.split("_")[0] == str(count):
-                            job["object_outputs"].append(
-                                {
-                                    "asset_id": asset["id"],
-                                    "output_path": str(output.relative_to(workspace.path)),
-                                    "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-                                }
-                            )
-            workspace.record_jobs(jobs)
-        return workspace.publish(jobs)
-    except BaseException:
-        workspace.record_jobs(jobs)
-        workspace.fail()
-        raise
-
-
-def finalize_face_selection(jobs, workspace, samples=()):
-    face_ids = {j["person"]["id"] for j in jobs if j["config"]["mode"] == "face"}
-    if any(s.person_id is not None and s.person_id not in face_ids for s in samples):
-        raise ValueError("Every labeled camera identity must be queued in face mode; null means unknown")
-    if not face_ids:
-        return
-    embed_samples(samples, "reference")
-    embed_samples(samples, "validation")
-    result = select_jobs(jobs, samples)
-    # Test embeddings cannot influence subset choice: read them only after search has finished.
-    embed_samples(samples, "test")
-    test = [s for s in samples if s.split == "test"]
-    workspace.manifest["evaluation"] = {
-        "validation": result["validation"],
-        "baseline_validation": result["baseline_validation"],
-        "test": evaluate(result["centers"], test),
-        "baseline_test": evaluate(result["baseline_centers"], test),
-        "baseline": "one reference-nearest quality-approved image per smart identity; time selections unchanged",
-        "camera_samples": [s.record() for s in samples],
-        "test_used_for_selection": False,
-        "model": get_frigate_model().identity,
-    }
-    workspace.record_jobs(jobs)
-
-
-def main() -> None:
-    """Entry point for if-curator CLI."""
-    parser = argparse.ArgumentParser(description="Prepare Frigate enrollment images from Immich")
-    parser.add_argument("--camera-manifest", help="Local JSON with reference/validation/test camera face crops")
-    args = parser.parse_args()
-    workspace = None
-    try:
-        setup_logging(verbose=False)
-
-        console.print(r"""
-    [bold blue]if-curator[/bold blue]
-    [dim]Immich -> Frigate Training Data Curator[/dim]
-        """)
-
-        ConfigManager.get().interactive_setup()
-
+        answer = Prompt.ask("\nPeople [dim](numbers or names, separated by commas)[/]", console=console)
         try:
-            Config.validate()
-        except ValueError as e:
-            rprint(f"[bold red]Configuration Error:[/bold red] {e}")
-            return
+            chosen = [find_person(people, part) for part in answer.split(",") if part.strip()]
+        except LookupError as error:
+            console.print(f"[yellow]{error}")
+            continue
+        if chosen:
+            return list({p["id"]: p for p in chosen}.values())
 
-        rprint(f"Server: [dim]{Config.IMMICH_URL}[/dim]")
-        rprint(f"Output: [dim]{Config.OUTPUT_DIR}[/dim]")
 
-        people = get_people()
-        if not people:
-            rprint("[bold red]Could not fetch people from Immich. Check URL/Key.[/bold red]")
-            return
+def summarize(jobs: list[Job]) -> Table:
+    faces = any(job.object_class is None for job in jobs)
+    table = Table(box=None, header_style="bold", pad_edge=False)
+    table.add_column("Person")
+    for column in ("Photos", "Usable", "Selected") + (("Recognized",) if faces else ()):
+        table.add_column(column, justify="right")
+    table.add_column("Top rejections", style="dim")
+    for job in jobs:
+        reasons = Counter(REASONS.get(c.reason, c.reason) for c in job.candidates if c.reason)
+        row = [job.name, str(len({c.asset_id for c in job.candidates})), str(len(job.eligible)), str(len(job.selected))]
+        if faces:
+            row.append("–" if job.recognized is None else f"{job.recognized:.0%}")
+        table.add_row(*row, ", ".join(f"{reason} {count}" for reason, count in reasons.most_common(3)))
+    return table
 
-        samples = (
-            load_manifest(args.camera_manifest or Config.CAMERA_MANIFEST)
-            if (args.camera_manifest or Config.CAMERA_MANIFEST)
-            else []
+
+def connect(settings):
+    if not settings.IMMICH_URL or not settings.API_KEY:
+        console.print("Connect to Immich. This is saved to .immich_config.json.")
+        url = settings.IMMICH_URL or Prompt.ask("Immich URL [dim](e.g. http://192.168.1.5:2283)[/]", console=console)
+        key = settings.API_KEY or Prompt.ask("API key", password=True, console=console)
+        save_connection(url, key)
+        settings = replace(settings, IMMICH_URL=url, API_KEY=key)
+    return settings, Immich(settings.IMMICH_URL, settings.API_KEY)
+
+
+def positive(text: str) -> int:
+    if not text.isdigit() or int(text) < 1:
+        raise argparse.ArgumentTypeError("must be a whole number of at least 1")
+    return int(text)
+
+
+def ask_number(question: str, default: int) -> int:
+    while (answer := IntPrompt.ask(question, default=default, console=console)) < 1:
+        console.print("[yellow]Enter a number of at least 1.")
+    return answer
+
+
+def load_model(object_class: str | None, settings):
+    with console.status("Loading models (the first run downloads about 300 MB)…"):
+        if object_class:
+            from .objects import ObjectModel, analyze_objects
+
+            model = ObjectModel(settings.CACHE_DIR, settings.FORCE_CPU)
+            model.class_id(object_class)
+            return model, analyze_objects
+        from .faces import analyze_faces
+        from .frigate import FrigateFaces
+
+        return FrigateFaces(f"{settings.CACHE_DIR}/frigate", settings.FORCE_CPU), analyze_faces
+
+
+def run(args: argparse.Namespace) -> int:
+    try:
+        settings = load_settings()
+    except ValueError as error:
+        console.print(f"[red]Configuration error: {error}")
+        return 2
+    settings, immich = connect(settings)
+    with console.status("Connecting to Immich…"):
+        people = sorted(immich.people(), key=lambda p: p["name"].casefold())
+    if not people:
+        console.print("[red]Immich has no named people yet.")
+        return 1
+
+    chosen = choose_people(people, args.people)
+    years, count = args.years or settings.YEARS_FILTER, args.count or settings.MAX_IMAGES
+    if not args.people:
+        years = args.years or ask_number("Years of photos to use", years)
+        count = args.count or ask_number("Images per person", count)
+    settings = replace(settings, YEARS_FILTER=years)
+    jobs = [Job(person, count, args.object) for person in chosen]
+
+    model, analyze = load_model(args.object, settings)
+    console.print(f"[dim]Running on {model.device}.[/]")
+    columns = TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), TimeRemainingColumn()
+    with Progress(*columns, console=console) as progress:
+        for job in jobs:
+            analyze(immich, model, job, settings, partial(progress.update, progress.add_task(job.name, total=None)))
+    select(jobs, settings.FRIGATE_RECOGNITION_THRESHOLD)
+
+    console.print()
+    console.print(summarize(jobs))
+    if any(job.recognized is not None for job in jobs):
+        console.print("[dim]Recognized: how many of the other usable photos Frigate would recognize with this set.[/]")
+    total = sum(len(job.selected) for job in jobs)
+    if not total:
+        console.print("\n[yellow]Nothing to export.")
+        return 1
+    question = f"\nExport {total} images to {settings.OUTPUT_DIR}/?"
+    if not args.yes and not Confirm.ask(question, default=True, console=console):
+        return 0
+
+    from .export import export
+
+    faces = None if args.object else model
+    with Progress(*columns, console=console, transient=True) as progress:
+        task = progress.add_task("Exporting", total=total)
+        destination = export(jobs, immich, faces, settings, partial(progress.advance, task))
+    console.print(f"Saved to [bold]{destination}[/]")
+    if faces:
+        console.print(
+            "[dim]Copy each person's folder into Frigate's face library (/media/frigate/clips/faces) and restart "
+            "Frigate, or upload the images in Frigate's Face Library.[/]"
         )
-        workspace = RunWorkspace(Config.OUTPUT_DIR)
-        jobs = interactive_configure(people, workspace)
+    return 0
 
-        if jobs:
-            with console.status("Optimizing identity centroids and evaluating held-out crops..."):
-                finalize_face_selection(jobs, workspace, samples)
-            _show_preview(jobs)
-            if Confirm.ask(f"Export {sum(j['limit'] for j in jobs)} selected images?"):
-                destination = execute_jobs(jobs, workspace)
-                console.print(f"Export complete: {destination}")
-            else:
-                workspace.fail("cancelled")
-        else:
-            rprint("[yellow]No jobs configured.[/yellow]")
-            workspace.fail("cancelled")
 
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(message)s",
+        handlers=[RichHandler(console=console, show_path=False)],
+    )
+    try:
+        code = run(args)
     except KeyboardInterrupt:
-        if workspace:
-            workspace.fail("interrupted")
-        rprint("\n[bold red]Aborted by user.[/bold red]")
-    except Exception:
-        if workspace:
-            workspace.fail()
-            console.print(f"Run failed; incomplete artifacts: {workspace.path}")
-        raise
-
-
-if __name__ == "__main__":
-    main()
+        console.print("\nCancelled.")
+        code = 130
+    except (ImmichError, LookupError, RuntimeError, requests.RequestException) as error:
+        if args.verbose:
+            raise
+        console.print(f"[red]{error}")
+        code = 1
+    raise SystemExit(code)

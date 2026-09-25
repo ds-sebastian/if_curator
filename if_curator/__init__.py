@@ -1,8 +1,3 @@
-"""Immich to Frigate training set curator.
+"""Pick the Immich photos that train Frigate face recognition best."""
 
-AI-powered tool to extract high-quality, diverse training images from your
-Immich library for Frigate's Face Recognition (ArcFace) and Object/State
-Classification models.
-"""
-
-__version__ = "0.2.1"
+__version__ = "0.3.0"

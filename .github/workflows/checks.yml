@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  offline-regressions:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -19,6 +19,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
       - run: uv run --locked pytest -q
         env:
           FORCE_CPU: 'true'

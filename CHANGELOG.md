@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-25
+
+A rewrite focused on what actually makes Frigate recognize people: a library that covers
+the whole range of someone's photos, cropped exactly as Frigate crops. See
+[how it works](docs/how-it-works.md).
+
+### Changed
+
+- **Selection spreads out instead of matching the typical face.** v0.2 chose images whose
+  average matched the center of a person's library. That reproduced the library's posed,
+  frontal look, which camera faces don't share, and it often stopped after a few images.
+  Selection now uses farthest-point sampling from the most typical face, as v0.1's
+  diversity selection effectively did, with a safeguard v0.1 lacked. In a simulation with
+  Frigate's exact scoring, this recognizes about twice as many camera faces.
+- **Faces are cropped and embedded exactly as Frigate stores them**: YuNet's tight box,
+  LBF alignment, ArcFace. Previous versions embedded a 15% margin crop, which Frigate never
+  sees. Exports are that tight crop, saved as WebP like Frigate's own uploads.
+- **Wrong faces are removed first**: faces with cosine below 0.3 to the person's
+  geometric median (Frigate's own midpoint), and faces closer to another queued person.
+- Sharpness is measured with the face scaled to 112 × 112, as ArcFace sees it. The old
+  native-resolution check rejected large, sharp faces and kept small, noisy ones.
+- Analysis uses Immich previews. Originals are downloaded only for the exported images,
+  and analyses are cached, so reruns are nearly instant.
+- A simpler CLI: pick several people at once by number or name, or pass names and
+  `--count`, `--years` and `--yes` for scripted runs. The summary shows usable faces, the
+  top rejection reasons, and how many held-out photos Frigate would recognize.
+- Export folders are named after the person, which is the label Frigate uses.
+- Much smaller install: InsightFace, PyTorch, Transformers and SigLIP are gone from face
+  mode. The `gpu` extra brings its own CUDA libraries. Object mode is an optional
+  `objects` extra that uses YOLO11 for detection and embeddings.
+
+### Fixed
+
+- People beyond the first 500 in Immich were never listed.
+- Videos were included in searches.
+- Face boxes slightly outside the photo were rejected instead of clipped.
+- The saved Immich connection file is now readable only by its owner.
+
+### Removed
+
+- Camera manifests and held-out camera evaluation, time-spread selection, the Starter
+  preset, optional 112 × 112 alignment export, and the run log file.
+
+### Upgrading
+
+- Renamed settings: `FACE_MAX_IMAGES` → `MAX_IMAGES`, and `MIN_FACE_WIDTH` → `MIN_FACE_SIZE`.
+  The size is now measured in Immich preview pixels, 80 by default. The default
+  `BLUR_THRESHOLD` is now 50, measured at 112 × 112.
+- Removed settings: `MIN_CONFIDENCE`, `MAX_AUTO_IMAGES`, `FACE_MARGIN`,
+  `ENABLE_FACE_ALIGNMENT`, `ENABLE_CACHE`, `FACE_BURST_SECONDS`,
+  `FACE_PIXEL_DUPLICATE_DISTANCE`, `FACE_OPTIMIZATION_EPSILON`, `FACE_IDENTITY_MARGIN`,
+  `FACE_OUTLIER_MAD`, `FRIGATE_VERSION`, `FRIGATE_MODEL_DIR`, `FRIGATE_UNKNOWN_SCORE`,
+  `FRIGATE_BLUR_CONFIDENCE_FILTER`, `CAMERA_MANIFEST`.
+- Runs are saved as `frigate_train/<date_time>/<Name>/NNN.webp`. Replace a person's
+  earlier images in Frigate rather than adding to them, so the old selection's bias
+  doesn't remain.
+
 ## [0.2.1] - 2026-09-04
 
 ### Fixed

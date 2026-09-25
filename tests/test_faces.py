@@ -1,285 +1,98 @@
-import hashlib
-from types import SimpleNamespace
-from unittest.mock import Mock
-
 import numpy as np
 import pytest
-from PIL import Image
+from conftest import FakeFaces, FakeImmich, photo, textured
 
-from if_curator import faces, immich_api
-from if_curator.config import Config
-from if_curator.faces import FaceCandidate, FacePipelineError
-from if_curator.quality import assess_quality, check_grayscale
-
-
-def test_target_metadata_not_first(metadata):
-    asset = {
-        "id": "group",
-        "people": [{"id": "other", "faces": [dict(metadata, id="other-face")]}, {"id": "target", "faces": [metadata]}],
-    }
-    assert immich_api.resolve_face_metadata(asset, "target") is metadata
+from if_curator import faces
+from if_curator.config import Settings
+from if_curator.faces import analyze_faces, crop_region, locate, measure, scale_box, verdict
+from if_curator.selection import Job
 
 
-@pytest.mark.parametrize(
-    "responses", [[], [{"person": {"id": "other"}}], [{"person": {"id": "target"}}, {"person": {"id": "target"}}]]
-)
-def test_missing_ambiguous_metadata(monkeypatch, responses):
-    response = Mock()
-    response.json.return_value = responses
-    monkeypatch.setattr(immich_api.requests, "get", lambda *a, **kw: response)
+def test_scale_box_rejects_other_aspect_ratios():
+    assert scale_box((10, 20, 30, 40), (100, 50), (400, 200)) == (40, 80, 120, 160)
     with pytest.raises(ValueError):
-        immich_api.resolve_face_metadata({"id": "asset"}, "target")
+        scale_box((10, 20, 30, 40), (100, 50), (200, 200))
 
 
-def test_metadata_fallback_without_optional_fields(monkeypatch, metadata):
-    response = Mock()
-    response.json.return_value = [dict(metadata, person={"id": "target"})]
-    monkeypatch.setattr(immich_api.requests, "get", lambda *a, **kw: response)
-    assert immich_api.resolve_face_metadata({"id": "asset"}, "target")["id"] == metadata["id"]
-
-
-def test_repeated_target_in_asset_rejected(metadata):
-    with pytest.raises(ValueError, match="ambiguous"):
-        immich_api.resolve_face_metadata({"people": [{"id": "p", "faces": [metadata, metadata]}]}, "p")
+def test_crop_region_clips_and_offsets_target():
+    region, target = crop_region(np.zeros((100, 200, 3)), (10, 20, 50, 60), margin=0.5)
+    assert region.shape == (80, 70, 3) and target == (10, 20, 50, 60)
+    region, target = crop_region(np.zeros((100, 200, 3)), (100, 40, 140, 60), margin=0.5)
+    assert region.shape == (40, 80, 3) and target == (20, 10, 60, 30)
 
 
 @pytest.mark.parametrize(
-    "boxes, succeeds",
+    "change, reason",
     [
-        ([[0, 0, 30, 30, 0.99], [60, 40, 200, 200, 0.8]], True),
-        ([[0, 0, 30, 30, 0.99]], False),
-        ([[60, 40, 200, 200, 0.8], [61, 41, 201, 201, 0.9]], False),
+        (lambda f: np.full_like(f, 128), "blurry"),
+        (lambda f: f // 10, "too_dark"),
+        (lambda f: np.clip(f.astype(int) + 200, 0, 255).astype(np.uint8), "too_bright"),
+        (lambda f: np.repeat(f[..., :1], 3, axis=2), "grayscale"),
+        (lambda f: f, None),
     ],
 )
-def test_detection_matches_expected_not_largest(image, boxes, succeeds):
-    landmarks = np.ones((len(boxes), 5, 2), dtype=np.float32)
-    app = SimpleNamespace(det_model=SimpleNamespace(detect=lambda *a, **kw: (np.array(boxes), landmarks)))
-    if succeeds:
-        _, target = faces.detect_target(app, image, (60, 40, 200, 200))
-        assert target.det_score == 0.8
-    else:
-        with pytest.raises(ValueError, match="ambiguous"):
-            faces.detect_target(app, image, (60, 40, 200, 200))
+def test_quality_checks(change, reason):
+    face = change(textured(150, 180))
+    assert verdict({"detected": True, **measure(face)}, Settings()) == reason
 
 
-def test_scaled_coordinates(metadata):
-    assert faces.scaled_bbox(metadata, (160, 120)) == (30, 20, 100, 100)
+def test_sharpness_is_measured_at_arcface_scale():
+    """The same face must not look sharper or blurrier just because the photo is bigger."""
+    face = textured(112, 112)
+    large = np.kron(face, np.ones((4, 4, 1), np.uint8))
+    assert measure(large)["sharpness"] == pytest.approx(measure(face)["sharpness"], rel=0.05)
 
 
-@pytest.mark.parametrize(
-    "change", [{"imageWidth": 0}, {"boundingBoxX1": -1}, {"boundingBoxX2": 900}, {"boundingBoxY1": float("nan")}]
-)
-def test_invalid_geometry(metadata, change):
-    with pytest.raises(ValueError):
-        faces.scaled_bbox(dict(metadata, **change), (320, 240))
+def test_locate():
+    immich = FakeImmich([])
+    assert locate(immich, photo(1, box=(-5, 10, 150, 160)), "p1", 80).box == (0, 10, 150, 160)
+    assert locate(immich, photo(1, box=(0, 0, 50, 200)), "p1", 80).reason == "too_small"
+    assert locate(immich, photo(1, isEdited=True), "p1", 80).reason == "edited"
+    assert locate(immich, photo(1), "someone else", 80).reason == "no_face_box"
+    twice = photo(1)
+    twice["people"][0]["faces"] *= 2
+    assert locate(immich, twice, "p1", 80).reason == "several_faces"
 
 
-def test_unverified_aspect_ratio(metadata):
-    with pytest.raises(ValueError, match="coordinate_mismatch"):
-        faces.scaled_bbox(metadata, (240, 320))
+def settings(tmp_path, **overrides):
+    return Settings(CACHE_DIR=str(tmp_path / "cache"), **overrides)
 
 
-def test_balanced_color_not_grayscale():
-    rgb = np.tile(np.array([[220, 80, 80], [80, 220, 80], [80, 80, 220]], dtype=np.uint8), (30, 10, 1))
-    assert np.ptp(rgb.mean(axis=(0, 1))) == 0
-    assert check_grayscale(rgb)[0]
-    assert not check_grayscale(np.full((30, 30, 3), 100, dtype=np.uint8))[0]
+def test_analysis_embeds_usable_faces_and_caches(tmp_path):
+    immich = FakeImmich([photo(i) for i in range(5)] + [photo(9, box=(0, 0, 20, 20))], broken={("asset-004", False)})
+    model = FakeFaces()
+    job = Job({"id": "p1", "name": "P"}, 3)
+    analyze_faces(immich, model, job, settings(tmp_path))
+    reasons = {c.asset_id: c.reason for c in job.candidates}
+    assert reasons == {
+        **{f"asset-00{i}": None for i in range(4)},
+        "asset-004": "download_failed",
+        "asset-009": "too_small",
+    }
+    assert all(c.embedding.shape == (512,) for c in job.eligible) and model.embedded == 4
+
+    immich.downloads.clear()
+    again = Job({"id": "p1", "name": "P"}, 3)
+    analyze_faces(immich, FakeFaces(), again, settings(tmp_path))
+    assert immich.downloads == [("asset-004", False)]  # only the failed download is retried
+    assert [c.reason for c in again.candidates] == [c.reason for c in job.candidates]
+
+    stricter = Job({"id": "p1", "name": "P"}, 3)
+    analyze_faces(immich, FakeFaces(), stricter, settings(tmp_path, BLUR_THRESHOLD=1e9))
+    assert {c.reason for c in stricter.candidates} == {"blurry", "download_failed", "too_small"}
 
 
-def test_prepared_bytes_and_target_quality(tmp_path, image, metadata, candidate, fake_app):
-    source = tmp_path / "source.png"
-    image.save(source)
-    faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, "fp")
-    assert not candidate.reasons
-    assert candidate.embedding is not None
-    assert candidate.effective_dimensions == (140, 160)
-    assert candidate.image_hash == hashlib.sha256(candidate.prepared_path.read_bytes()).hexdigest()
-    with Image.open(candidate.prepared_path) as encoded:
-        assert encoded.size == (182, 208)
+def test_undetected_faces_are_rejected(tmp_path):
+    model = FakeFaces()
+    model.detect = lambda image, target: None
+    job = Job({"id": "p1", "name": "P"}, 3)
+    analyze_faces(FakeImmich([photo(1)]), model, job, settings(tmp_path))
+    assert job.candidates[0].reason == "no_face_detected" and model.embedded == 0
 
 
-def test_blurry_dark_face_not_rescued_by_background(tmp_path, image, metadata, candidate, fake_app):
-    image.paste((15, 8, 5), (60, 40, 200, 200))
-    source = tmp_path / "source.png"
-    image.save(source)
-    faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, "fp")
-    assert any("Blurry" in reason for reason in candidate.reasons)
-    assert any("Underexposed" in reason for reason in candidate.reasons)
-
-
-@pytest.mark.parametrize("align", [True, False])
-def test_minimum_size_before_margin_or_alignment(tmp_path, image, metadata, candidate, fake_app, monkeypatch, align):
-    monkeypatch.setattr(Config, "ENABLE_FACE_ALIGNMENT", align)
-    monkeypatch.setattr(Config, "FACE_MARGIN", 1.0)
-    source = tmp_path / "source.png"
-    image.resize((160, 120)).save(source)
-    with pytest.raises(ValueError, match="face_too_small"):
-        faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, "fp")
-
-
-def test_zero_confidence_is_rejected(image):
-    result = assess_quality(image, confidence=0)
-    assert not result.passed
-    assert result.measurements["detection_confidence"] == 0
-
-
-def test_cache_scoped_by_face_person_bytes_and_model(tmp_path, image, metadata, fake_app, monkeypatch):
-    monkeypatch.setattr(Config, "ENABLE_CACHE", True)
-    source = tmp_path / "source.png"
-    image.save(source)
-    embedder = Mock(return_value=np.ones(512))
-    fake_app.models["recognition"].get = embedder
-    for person, face, fp in [
-        ("p", "f", "m"),
-        ("p", "f", "m"),
-        ("other", "f", "m"),
-        ("p", "other", "m"),
-        ("p", "f", "new-model"),
-    ]:
-        candidate = FaceCandidate("a", person, face)
-        faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, fp)
-    assert embedder.call_count == 4
-    image.paste((200, 50, 50), (70, 50, 80, 60))
-    image.save(source)
-    faces._prepare_one(FaceCandidate("a", "p", "f"), metadata, source, tmp_path, fake_app, "m")
-    assert embedder.call_count == 5
-
-
-def test_empty_and_unavailable_model(tmp_path, monkeypatch):
-    assert faces.prepare_face_candidates([], "p", tmp_path) == ([], None)
-    monkeypatch.setattr(faces, "get_insightface_app", lambda: None)
-    with pytest.raises(FacePipelineError, match="unavailable"):
-        faces.prepare_face_candidates([{"id": "a"}], "p", tmp_path)
-
-
-def test_prepare_rejects_edits_and_reports_provenance(tmp_path, image, metadata, fake_app, monkeypatch):
-    monkeypatch.setattr(faces, "resolve_face_metadata", lambda *a: metadata)
-    monkeypatch.setattr(faces, "fetch_image_source", lambda *a: (image.copy(), "preview"))
-    records, fp = faces.prepare_face_candidates([{"id": "good"}, {"id": "edited", "isEdited": True}], "p", tmp_path)
-    assert fp == "test-fingerprint:frigate-test"
-    good = next(c for c in records if c.asset_id == "good")
-    assert good.source == "preview" and good.embedding is not None
-    bad = next(c for c in records if c.asset_id == "edited")
-    assert "unverified_edited_coordinates" in bad.reasons[0]
-    assert not (tmp_path / "sources").exists()
-
-
-def test_runtime_model_failure_does_not_fallback(tmp_path, image, metadata, fake_app, monkeypatch):
-    monkeypatch.setattr(faces, "resolve_face_metadata", lambda *a: metadata)
-    monkeypatch.setattr(faces, "fetch_image_source", lambda *a: (image.copy(), "original"))
-    fake_app.models["recognition"].get = Mock(side_effect=RuntimeError("inference failed"))
-    with pytest.raises(FacePipelineError):
-        faces.prepare_face_candidates([{"id": "a"}], "p", tmp_path)
-
-
-def test_aligned_output_uses_local_landmarks_and_encoded_quality(
-    tmp_path, image, metadata, candidate, fake_app, monkeypatch
-):
-    import sys
-
-    # Isolate the crop transform from optional model dependencies in offline tests.
-    alignment_module = SimpleNamespace(
-        estimate_norm=lambda kps, image_size: np.array([[0.5, 0, 0], [0, 0.5, 0]], dtype=np.float32)
-    )
-    monkeypatch.setitem(sys.modules, "insightface.utils.face_align", alignment_module)
-    monkeypatch.setattr(Config, "ENABLE_FACE_ALIGNMENT", True)
-    detector = Mock(wraps=faces.detect_target)
-    monkeypatch.setattr(faces, "detect_target", detector)
-    embedder = Mock(return_value=np.ones(512))
-    fake_app.models["recognition"].get = embedder
-    source = tmp_path / "source.png"
-    image.save(source)
-    faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, "fp")
-    assert detector.call_count == 1
-    np.testing.assert_allclose(embedder.call_args.args[1].kps[0], [20, 25])
-    assert candidate.effective_dimensions == (140, 160)
-    with Image.open(candidate.prepared_path) as output:
-        assert output.size == (112, 112)
-    assert candidate.measurements["detection_confidence"] == 0.95
-
-
-def test_detector_runtime_failure_is_not_a_rejection(image):
-    app = SimpleNamespace(det_model=SimpleNamespace(detect=Mock(side_effect=ValueError("bad model input"))))
-    with pytest.raises(FacePipelineError, match="detector failed"):
-        faces.detect_target(app, image, (60, 40, 200, 200))
-
-
-def test_embedding_value_error_is_not_a_quality_rejection(tmp_path, image, metadata, fake_app, monkeypatch):
-    monkeypatch.setattr(faces, "resolve_face_metadata", lambda *a: metadata)
-    monkeypatch.setattr(faces, "fetch_image_source", lambda *a: (image.copy(), "original"))
-    fake_app.models["recognition"].get = Mock(side_effect=ValueError("bad model input"))
-    with pytest.raises(FacePipelineError):
-        faces.prepare_face_candidates([{"id": "a"}], "p", tmp_path)
-
-
-def test_fingerprint_changes_with_weights(tmp_path):
-    model = tmp_path / "model.onnx"
-    model.write_bytes(b"first-version")
-    app = SimpleNamespace(models={"recognition": SimpleNamespace(model_file=model)})
-    first = faces.model_fingerprint(app)
-    model.write_bytes(b"second-version")
-    assert first != faces.model_fingerprint(app)
-
-
-def test_candidate_cap_audited_without_downloads(tmp_path, fake_app, monkeypatch):
-    calls = []
-
-    def no_metadata(asset, person_id):
-        calls.append(asset["id"])
-        raise ValueError("missing_target")
-
-    monkeypatch.setattr(faces, "resolve_face_metadata", no_metadata)
-    records, _ = faces.prepare_face_candidates([{"id": f"{i:04}"} for i in range(3002)], "p", tmp_path)
-    assert len(calls) == 3000
-    assert len(records) == 3002
-    assert sum(c.reasons == ["candidate_pool_cap"] for c in records) == 2
-
-
-def test_embedding_receives_decoded_export_pixels(tmp_path, image, metadata, candidate, fake_app):
-    import cv2
-
-    source = tmp_path / "source.png"
-    image.save(source)
-    embedding_call = Mock(return_value=np.ones(512))
-    fake_app.models["recognition"].get = embedding_call
-    faces._prepare_one(candidate, metadata, source, tmp_path, fake_app, "fp")
-    with Image.open(candidate.prepared_path) as final:
-        expected = cv2.cvtColor(np.asarray(final.convert("RGB")), cv2.COLOR_RGB2BGR)
-    np.testing.assert_array_equal(embedding_call.call_args.args[0], expected)
-
-
-def test_tight_crop_uses_single_face_detection_scale_without_resizing_export(image):
-    expected = (60, 40, 200, 200)
-    calls = []
-
-    def detect(bgr, *, input_size, max_num):
-        calls.append((bgr.shape, input_size, max_num))
-        # Reproduce SCRFD's large-face failure at the full-photograph input size.
-        if input_size == (640, 640):
-            return np.empty((0, 5)), np.empty((0, 5, 2))
-        return np.array([[*expected, 0.89]]), np.ones((1, 5, 2), dtype=np.float32)
-
-    app = SimpleNamespace(det_model=SimpleNamespace(detect=detect))
-    bgr, target = faces.detect_target(app, image, expected)
-    assert calls == [((image.height, image.width, 3), (320, 320), 0)]
-    assert bgr.shape[:2] == (image.height, image.width)
-    assert target.det_score == 0.89
-    np.testing.assert_array_equal(target.bbox, expected)
-
-
-def test_single_face_scale_does_not_relax_confidence_gate(image):
-    app = SimpleNamespace(
-        det_model=SimpleNamespace(
-            detect=lambda *a, **kw: (np.array([[60, 40, 200, 200, 0.6]]), np.ones((1, 5, 2), dtype=np.float32))
-        )
-    )
-    _, target = faces.detect_target(app, image, (60, 40, 200, 200))
-    quality = assess_quality(
-        image.crop((60, 40, 200, 200)),
-        confidence=target.det_score,
-        min_confidence=0.7,
-        blur_threshold=0,
-        reject_grayscale=False,
-    )
-    assert not quality.passed
-    assert any(reason.startswith("Low confidence") for reason in quality.reasons)
+def test_large_libraries_are_sampled_through_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(faces, "MAX_CANDIDATES", 3)
+    job = Job({"id": "p1", "name": "P"}, 3)
+    analyze_faces(FakeImmich([photo(i) for i in range(9)]), FakeFaces(), job, settings(tmp_path))
+    assert [c.asset_id for c in job.eligible] == ["asset-000", "asset-004", "asset-008"]
+    assert sum(c.reason == "sample_limit" for c in job.candidates) == 6
