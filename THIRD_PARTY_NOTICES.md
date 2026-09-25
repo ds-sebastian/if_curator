@@ -1,7 +1,8 @@
 # Frigate compatibility implementation
 
-`if_curator/frigate.py` adapts the alignment, preprocessing, aggregation and confidence
-calculations from Frigate v0.17.2 (https://github.com/blakeblackshear/frigate/tree/v0.17.2).
+`if_curator/frigate.py` adapts the face detection, alignment, preprocessing, aggregation and
+confidence calculations from Frigate v0.17.2 (https://github.com/blakeblackshear/frigate/tree/v0.17.2),
+and downloads the models Frigate uses from https://github.com/NickM-27/facenet-onnx.
 
 The MIT License
 

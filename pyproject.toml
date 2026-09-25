@@ -1,32 +1,37 @@
 [project]
 name = "if-curator"
-version = "0.2.1"
-description = "Immich to Frigate training sets"
+version = "0.3.0"
+description = "Pick the Immich photos that train Frigate face recognition best"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 authors = [{ name = "ds-sebastian" }]
-keywords = ["immich", "frigate", "face-recognition", "training-data", "arcface", "insightface"]
+keywords = ["immich", "frigate", "face-recognition", "training-data", "arcface"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 dependencies = [
-    "insightface>=0.7.3",
     "numpy>=2.2.6",
-    "onnxruntime>=1.23.2",
+    # The GPU build also runs on CPU. One ONNX Runtime package per platform, so switching
+    # between GPU and CPU runs never uninstalls files the other package needs.
+    "onnxruntime-gpu>=1.23.2; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
+    "onnxruntime>=1.23.2; sys_platform == 'darwin' or (platform_machine != 'x86_64' and platform_machine != 'AMD64')",
     "opencv-contrib-python-headless>=4.12.0.88",
     "pillow>=12.1.0",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
     "rich>=14.2.0",
-    "torch>=2.9.1",
-    "transformers>=4.57.6",
-    "ultralytics>=8.3.252",
 ]
+
+[project.optional-dependencies]
+# NVIDIA's CUDA and cuDNN libraries, so no system CUDA install is needed.
+gpu = [
+    "onnxruntime-gpu[cuda,cudnn]>=1.23.2; sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')",
+]
+objects = ["ultralytics>=8.3.252"]
 
 [project.scripts]
 if-curator = "if_curator.cli:main"
@@ -34,52 +39,24 @@ if-curator = "if_curator.cli:main"
 [project.urls]
 Repository = "https://github.com/ds-sebastian/if_curator"
 
-[project.optional-dependencies]
-gpu = [
-    "onnxruntime-gpu>=1.23.2",
-]
-
 [dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.9.2",
-]
+dev = ["pytest>=8.0", "ruff>=0.9.2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES.md" = "if_curator/THIRD_PARTY_NOTICES.md"
+
+[tool.uv]
+# The contrib wheel provides cv2 with Frigate's LBF landmarks; don't let other wheels overwrite it.
+exclude-dependencies = ["opencv-python", "opencv-python-headless"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
-
-[tool.deptry]
-pep621_dev_dependency_groups = ["dev"]
-
-[tool.deptry.package_module_name_map]
-pillow = "PIL"
-opencv-contrib-python-headless = "cv2"
-python-dotenv = "dotenv"
-insightface = "insightface"
-numpy = "numpy"
-onnxruntime = "onnxruntime"
-requests = "requests"
-rich = "rich"
-torch = "torch"
-transformers = "transformers"
-ultralytics = "ultralytics"
-
-[tool.deptry.per_rule_ignores]
-# onnxruntime-gpu is an optional dep that replaces onnxruntime at runtime
-DEP002 = ["onnxruntime-gpu"]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.uv]
-# The contrib wheel provides cv2, including Frigate’s LBF landmarks.
-# Avoid overlapping cv2 files from transitive InsightFace/Ultralytics wheels.
-exclude-dependencies = ["opencv-python", "opencv-python-headless"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"THIRD_PARTY_NOTICES.md" = "if_curator/THIRD_PARTY_NOTICES.md"
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["B905"]
