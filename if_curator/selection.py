@@ -33,6 +33,7 @@ class Candidate:
     measures: dict = field(default_factory=dict)
     embedding: np.ndarray | None = field(default=None, repr=False)
     reason: str | None = None  # Why it can't be used; None means eligible.
+    data: bytes | None = field(default=None, repr=False)  # A Frigate snapshot's image, exported as is.
 
 
 @dataclass
@@ -43,6 +44,8 @@ class Job:
     candidates: list[Candidate] = field(default_factory=list)
     selected: list[Candidate] = field(default_factory=list)
     recognized: float | None = None
+    center: np.ndarray | None = field(default=None, repr=False)  # Robust center of the usable faces.
+    snapshots: list[Candidate] = field(default_factory=list)  # Frigate snapshots labeled as this person.
 
     @property
     def name(self) -> str:
@@ -88,12 +91,13 @@ def farthest_points(units: np.ndarray, count: int, duplicate: float = DUPLICATE_
 
 def select(jobs: list[Job], recognition_threshold: float) -> None:
     faces = [job for job in jobs if job.object_class is None]
-    centers = {id(job): geometric_median(unit([c.embedding for c in job.eligible])) for job in faces if job.eligible}
     for job in faces:
-        rivals = [(other.name, centers[id(other)]) for other in faces if other is not job and id(other) in centers]
+        job.center = geometric_median(unit([c.embedding for c in job.eligible])) if job.eligible else None
+    for job in faces:
+        rivals = [(other.name, other.center) for other in faces if other is not job and other.center is not None]
         for candidate in job.eligible:
             vector = unit(candidate.embedding)
-            own = vector @ centers[id(job)]
+            own = vector @ job.center
             if own < IDENTITY_FLOOR:
                 candidate.reason = "unlike_person"
                 continue

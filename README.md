@@ -65,6 +65,27 @@ Queue people who look alike (siblings, parents and children) in the same run, so
 Immich mixed up between them are left out. For children, use only the last year or two
 of photos: faces from years ago won't help Frigate recognize them today.
 
+## Labeling Frigate's snapshots (optional)
+
+Frigate keeps its recent camera face attempts, mostly unlabeled, in the Face Library's
+**Train** tab. These are the most useful training images there are, because they show how
+your cameras actually see people. Point if-curator at Frigate and it labels the ones that
+clearly match someone you queued:
+
+```dotenv
+FRIGATE_URL=http://frigate:5000      # or the authenticated port with the two lines below
+FRIGATE_USER=admin
+FRIGATE_PASSWORD=…
+```
+
+A snapshot gets a person's name only when Frigate would recognize it (score ≥ 0.9)
+against that person's whole Immich library, and it matches them clearly better than
+anyone else queued. Only the best snapshot from each event is kept, and the rest are
+spread out like the Immich picks, up to the same count. They're exported into the
+person's folder next to the Immich images, and the summary's **Frigate** column shows
+how many there are. Frigate itself isn't changed. Queue everyone who regularly appears
+on your cameras, so a snapshot of one person can't be credited to a look-alike.
+
 ## Settings
 
 Set these in the environment or in `.env`:
@@ -82,6 +103,8 @@ Set these in the environment or in `.env`:
 | `USE_FULL_RESOLUTION` | `true` | Export from originals rather than previews |
 | `FRIGATE_RECOGNITION_THRESHOLD` | `0.9` | Your Frigate `recognition_threshold`, for the Recognized column |
 | `FORCE_CPU` | `false` | Don't use the GPU |
+| `FRIGATE_URL` | empty | Frigate's address, to label its face snapshots |
+| `FRIGATE_USER`, `FRIGATE_PASSWORD` | empty | Frigate login, if its API requires one |
 
 ## Object mode
 

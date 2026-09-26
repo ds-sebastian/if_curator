@@ -72,3 +72,16 @@ def test_connection_is_saved_only_after_it_works(monkeypatch):
     with pytest.raises(cli.requests.ConnectionError):
         cli.connect(config.load_settings({}))
     assert not config.CONNECTION_FILE.exists()
+
+
+def test_unreachable_frigate_is_skipped(monkeypatch, capsys):
+    from if_curator import snapshots
+    from if_curator.config import Settings
+
+    def refuse(self, *args):
+        raise cli.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(snapshots.Frigate, "snapshots", refuse)
+    columns = (cli.TextColumn("{task.description}"),)
+    assert cli.match_snapshots([], FakeFaces(), Settings(FRIGATE_URL="http://frigate:5000"), columns) is None
+    assert "Skipping Frigate snapshots" in capsys.readouterr().out

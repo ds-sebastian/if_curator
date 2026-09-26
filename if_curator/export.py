@@ -72,6 +72,20 @@ def _write(job: Job, folder: Path, immich: Immich, faces, sources: list[str], pr
                 "Skipped photo %s of %s: couldn't download it or find the face again", candidate.asset_id, job.name
             )
         progress()
+    for snapshot in job.snapshots:
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{len(images):03d}.webp"
+        path.write_bytes(snapshot.data)
+        images.append(
+            {
+                "file": f"{folder.name}/{path.name}",
+                "frigate_file": snapshot.asset_id,
+                "taken": snapshot.taken,
+                "source": "frigate",
+                **snapshot.measures,
+            }
+        )
+        progress()
     return images
 
 
@@ -100,6 +114,7 @@ def export(jobs: list[Job], immich: Immich, faces, settings, progress=lambda: No
                     "photos": len({c.asset_id for c in job.candidates}),
                     "usable": len(job.eligible),
                     "exported": len(images),
+                    "frigate_snapshots": len(job.snapshots),
                     "recognized": job.recognized,
                     "rejections": dict(reasons.most_common()),
                     "images": images,

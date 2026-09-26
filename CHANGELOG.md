@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Optionally label Frigate's unlabeled face snapshots (the Face Library's Train tab) with
+  the queued Immich person they clearly match, and export them next to the Immich picks.
+  Set `FRIGATE_URL`, plus `FRIGATE_USER` and `FRIGATE_PASSWORD` for an authenticated port.
+  A snapshot needs Frigate's recognition score against the person's whole Immich library,
+  and a clear lead over every other queued person; one per event is kept. Frigate itself
+  isn't modified.
+
 ## [0.3.0] - 2026-09-25
 
 A rewrite focused on what actually makes Frigate recognize people: a library that covers

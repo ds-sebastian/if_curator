@@ -33,6 +33,11 @@ def confidence(cosine: float) -> float:
     return 1 / (1 + math.exp(-20 * (cosine - 0.3)))
 
 
+def cosine_for(score: float) -> float:
+    """The cosine at which Frigate reports `score`: the inverse of confidence()."""
+    return 0.3 + math.log(score / (1 - score)) / 20
+
+
 def trimmed_mean(embeddings) -> np.ndarray:
     """scipy.stats.trim_mean(embeddings, 0.15): the center Frigate builds for each person."""
     values = np.sort(np.asarray(embeddings, dtype=np.float64), axis=0)
