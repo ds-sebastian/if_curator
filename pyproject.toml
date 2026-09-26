@@ -1,6 +1,6 @@
 [project]
 name = "if-curator"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pick the Immich photos that train Frigate face recognition best"
 readme = "README.md"
 license = "MIT"
